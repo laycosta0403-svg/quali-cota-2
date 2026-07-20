@@ -1,0 +1,8 @@
+streamlit
+pandas
+openpyxl
+pyarrow
+xlsxwriter
+plotly
+office365-rest-python-client
+python-dotenv
