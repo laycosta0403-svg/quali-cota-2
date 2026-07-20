@@ -1,0 +1,551 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Iterable
+
+import pandas as pd
+
+from src.leitura import (
+    booleano_sim,
+    dividir_eans,
+    normalizar_texto,
+    numero,
+    texto_codigo,
+)
+
+
+@dataclass
+class ResultadoMotor:
+    pedido: pd.DataFrame
+    opcoes: pd.DataFrame
+    pendencias: pd.DataFrame
+    historico: pd.DataFrame
+    ofertas_tratadas: pd.DataFrame
+    resumo: dict[str, object]
+
+
+def _col(df: pd.DataFrame, nome: str, padrao: object = "") -> pd.Series:
+    if nome in df.columns:
+        return df[nome]
+    return pd.Series([padrao] * len(df), index=df.index, dtype=object)
+
+
+def _normalizar_cadastro(df: pd.DataFrame) -> pd.DataFrame:
+    cad = df.copy()
+    for coluna in ["ean_compra", "ean_venda", "sku"]:
+        cad[coluna] = _col(cad, coluna).map(texto_codigo)
+    cad["status_ean"] = _col(cad, "status_ean", "Ativo")
+    cad["caixaria_padrao"] = _col(cad, "caixaria_padrao", 1).map(lambda v: max(1, int(numero(v, 1))))
+    cad["multiplo_padrao"] = _col(cad, "multiplo_padrao", 1).map(lambda v: max(1, int(numero(v, 1))))
+    return cad
+
+
+def _normalizar_regras(df: pd.DataFrame, desativados: Iterable[str]) -> pd.DataFrame:
+    regras = df.copy()
+    regras["fornecedor_norm"] = _col(regras, "fornecedor").map(normalizar_texto)
+    desativados_norm = {normalizar_texto(v) for v in desativados}
+    regras["ativo_bool"] = _col(regras, "ativo", "Sim").map(booleano_sim)
+    regras.loc[regras["fornecedor_norm"].isin(desativados_norm), "ativo_bool"] = False
+    regras["bloqueado_bool"] = _col(regras, "bloqueado", "Não").map(booleano_sim)
+    regras["participa_cotacao_bool"] = _col(regras, "participa_cotacao", "Sim").map(booleano_sim)
+    regras["participa_busca_bool"] = _col(regras, "participa_busca", "Sim").map(booleano_sim)
+    return regras
+
+
+def _mapa_cadastro(cadastro: pd.DataFrame) -> tuple[dict[str, dict], dict[str, dict]]:
+    por_ean: dict[str, dict] = {}
+    por_sku: dict[str, dict] = {}
+    for _, linha in cadastro.iterrows():
+        registro = linha.to_dict()
+        sku = texto_codigo(registro.get("sku"))
+        if sku:
+            por_sku[sku] = registro
+        for ean in {texto_codigo(registro.get("ean_compra")), texto_codigo(registro.get("ean_venda"))}:
+            if ean:
+                por_ean[ean] = registro
+    return por_ean, por_sku
+
+
+def _preparar_necessidade(df: pd.DataFrame, cadastro: pd.DataFrame) -> pd.DataFrame:
+    por_ean, por_sku = _mapa_cadastro(cadastro)
+    linhas: list[dict] = []
+    for _, row in df.iterrows():
+        item = row.to_dict()
+        sku = texto_codigo(item.get("sku"))
+        ean = texto_codigo(item.get("ean"))
+        reg = por_sku.get(sku) if sku else por_ean.get(ean)
+        if reg:
+            sku = sku or texto_codigo(reg.get("sku"))
+            ean = ean or texto_codigo(reg.get("ean_venda")) or texto_codigo(reg.get("ean_compra"))
+        multiplo = max(
+            1,
+            int(numero((reg or {}).get("multiplo_padrao"), 1)),
+            int(numero((reg or {}).get("caixaria_padrao"), 1)),
+        )
+        qtd = max(0, int(math.ceil(numero(item.get("quantidade_solicitada"), 0))))
+        qtd_ajustada = int(math.ceil(qtd / multiplo) * multiplo) if qtd else 0
+        linhas.append(
+            {
+                **item,
+                "sku": sku,
+                "ean": ean,
+                "descricao": item.get("descricao") or (reg or {}).get("descricao_oficial", ""),
+                "descricao_oficial": (reg or {}).get("descricao_oficial", item.get("descricao", "")),
+                "fabricante": item.get("fabricante") or (reg or {}).get("fabricante", ""),
+                "categoria": item.get("categoria") or (reg or {}).get("categoria", ""),
+                "quantidade_solicitada": qtd,
+                "quantidade_ajustada": qtd_ajustada,
+                "multiplo": multiplo,
+                "ean_encontrado": bool(reg),
+                "ruptura_cronica_bool": booleano_sim(item.get("ruptura_cronica")),
+                "ultimo_custo": numero(item.get("ultimo_custo"), numero(item.get("pmz"), 0)),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def _regra_fornecedor(regras: pd.DataFrame, fornecedor: object) -> dict:
+    chave = normalizar_texto(fornecedor)
+    encontrados = regras[regras["fornecedor_norm"] == chave]
+    return encontrados.iloc[0].to_dict() if not encontrados.empty else {}
+
+
+def _homologado(homologacao: pd.DataFrame, ol: object, fornecedor: object) -> bool:
+    if homologacao.empty:
+        return True
+    ol_norm = normalizar_texto(ol)
+    forn_norm = normalizar_texto(fornecedor)
+    for _, linha in homologacao.iterrows():
+        if normalizar_texto(linha.get("ol_industria")) == ol_norm and normalizar_texto(linha.get("fornecedor")) == forn_norm:
+            return booleano_sim(linha.get("ativo"))
+    return False
+
+
+def _preparar_ofertas(
+    cotacao: pd.DataFrame,
+    cadastro: pd.DataFrame,
+    regras: pd.DataFrame,
+    homologacao: pd.DataFrame,
+) -> pd.DataFrame:
+    por_ean, _ = _mapa_cadastro(cadastro)
+    linhas: list[dict] = []
+    for _, row in cotacao.iterrows():
+        original = row.to_dict()
+        eans = dividir_eans(original.get("ean")) or [""]
+        for ean in eans:
+            cad = por_ean.get(ean)
+            fornecedor = original.get("fornecedor", "")
+            regra = _regra_fornecedor(regras, fornecedor)
+            tipo_operacao = original.get("tipo_operacao") or regra.get("tipo_operacao", "")
+            embalagem = max(1, int(numero(original.get("embalagem"), 1)))
+            multiplo = max(1, int(numero(original.get("multiplo"), embalagem)))
+            divisor = max(embalagem, multiplo, int(numero((cad or {}).get("caixaria_padrao"), 1)))
+            preco_final = numero(original.get("preco_final"), 0)
+            preco_fabrica = numero(original.get("preco_fabrica"), 0)
+            desconto = numero(original.get("desconto"), 0)
+            if preco_final <= 0 and preco_fabrica > 0:
+                desconto_decimal = desconto / 100 if desconto > 1 else desconto
+                preco_final = preco_fabrica * (1 - desconto_decimal)
+            tipo_preco = normalizar_texto(original.get("tipo_preco"))
+            preco_unitario = preco_final / divisor if "caixa" in tipo_preco else preco_final
+            estoque = max(0, int(numero(original.get("estoque_fornecedor"), 0)))
+
+            motivos: list[str] = []
+            if cad is None:
+                motivos.append("EAN não encontrado")
+            elif normalizar_texto(cad.get("status_ean", "Ativo")) not in {"ativo", "ok", "sim"}:
+                motivos.append("EAN inativo")
+            if not regra:
+                motivos.append("Fornecedor sem regra")
+            else:
+                if not bool(regra.get("ativo_bool")):
+                    motivos.append("Fornecedor desativado")
+                if bool(regra.get("bloqueado_bool")):
+                    motivos.append("Fornecedor bloqueado")
+                if not bool(regra.get("participa_cotacao_bool")):
+                    motivos.append("Fornecedor fora da cotação")
+            if normalizar_texto(tipo_operacao) == "ol" and not _homologado(homologacao, original.get("ol_industria"), fornecedor):
+                motivos.append("OL não homologada")
+            if preco_unitario <= 0:
+                motivos.append("Sem preço válido")
+            if estoque <= 0:
+                motivos.append("Sem estoque")
+
+            linhas.append(
+                {
+                    **original,
+                    "ean_original": texto_codigo(original.get("ean")),
+                    "ean": ean,
+                    "sku": texto_codigo((cad or {}).get("sku")),
+                    "descricao_oficial": (cad or {}).get("descricao_oficial", original.get("descricao_recebida", "")),
+                    "fabricante": (cad or {}).get("fabricante", ""),
+                    "categoria": (cad or {}).get("categoria", ""),
+                    "fornecedor": fornecedor,
+                    "codigo_fornecedor": texto_codigo(original.get("codigo_fornecedor") or regra.get("codigo_fornecedor")),
+                    "tipo_operacao": tipo_operacao,
+                    "preco_fabrica": preco_fabrica,
+                    "preco_final": preco_final,
+                    "preco_unitario": round(preco_unitario, 6),
+                    "estoque_fornecedor": estoque,
+                    "caixaria": divisor,
+                    "multiplo": multiplo,
+                    "prazo_pagamento": regra.get("prazo_pagamento", ""),
+                    "lead_time": regra.get("lead_time", ""),
+                    "email": regra.get("email", ""),
+                    "origem": "Cotação atual",
+                    "valida": not motivos,
+                    "motivos_rejeicao": " | ".join(dict.fromkeys(motivos)),
+                    "status_ean": "OK" if cad is not None else "EAN não encontrado",
+                    "status_fornecedor": "OK" if regra and bool(regra.get("ativo_bool")) and not bool(regra.get("bloqueado_bool")) else "Inválido",
+                    "status_homologacao": "OK" if normalizar_texto(tipo_operacao) != "ol" or _homologado(homologacao, original.get("ol_industria"), fornecedor) else "Não homologada",
+                }
+            )
+    return pd.DataFrame(linhas)
+
+
+def _ofertas_historico(
+    historico: pd.DataFrame,
+    sku: str,
+    regras: pd.DataFrame,
+    quantidade: int,
+) -> pd.DataFrame:
+    if historico.empty or not sku:
+        return pd.DataFrame()
+    hist = historico.copy()
+    hist["sku"] = _col(hist, "sku").map(texto_codigo)
+    hist = hist[hist["sku"] == sku].copy()
+    if hist.empty:
+        return hist
+    linhas = []
+    for _, row in hist.iterrows():
+        item = row.to_dict()
+        regra = _regra_fornecedor(regras, item.get("fornecedor"))
+        if not regra or not bool(regra.get("ativo_bool")) or bool(regra.get("bloqueado_bool")) or not bool(regra.get("participa_busca_bool")):
+            continue
+        preco = numero(item.get("preco_unitario"), numero(item.get("preco_final"), 0))
+        estoque = int(numero(item.get("estoque_fornecedor"), 0))
+        if preco <= 0 or estoque <= 0:
+            continue
+        linhas.append(
+            {
+                **item,
+                "ean": texto_codigo(item.get("ean")),
+                "sku": sku,
+                "codigo_fornecedor": texto_codigo(item.get("codigo_fornecedor") or regra.get("codigo_fornecedor")),
+                "preco_unitario": preco,
+                "estoque_fornecedor": estoque,
+                "prazo_pagamento": regra.get("prazo_pagamento", item.get("prazo_pagamento", "")),
+                "lead_time": regra.get("lead_time", item.get("lead_time", "")),
+                "email": regra.get("email", item.get("email", "")),
+                "origem": "Busca ampliada",
+                "valida": True,
+                "motivos_rejeicao": "",
+                "atende_total": estoque >= quantidade,
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def _pendencias_ofertas(ofertas: pd.DataFrame) -> list[dict]:
+    pendencias: list[dict] = []
+    if ofertas.empty:
+        return pendencias
+    for _, oferta in ofertas[~ofertas["valida"]].iterrows():
+        for motivo in str(oferta.get("motivos_rejeicao", "")).split(" | "):
+            if not motivo:
+                continue
+            acao = {
+                "EAN não encontrado": "Cadastrar o EAN no cadastro EAN/SKU.",
+                "Fornecedor bloqueado": "Revisar o bloqueio do fornecedor.",
+                "Fornecedor desativado": "Reativar o fornecedor apenas se a regra estiver correta.",
+                "OL não homologada": "Homologar a relação OL × distribuidor ou usar outra oferta.",
+                "Sem preço válido": "Verificar PF, desconto ou preço final enviado.",
+                "Sem estoque": "Usar outra opção ou busca ampliada.",
+                "Fornecedor sem regra": "Cadastrar o fornecedor na base de regras.",
+            }.get(motivo, "Revisar a base de origem.")
+            pendencias.append(
+                {
+                    "SKU": texto_codigo(oferta.get("sku")),
+                    "EAN": texto_codigo(oferta.get("ean")),
+                    "Descrição": oferta.get("descricao_oficial") or oferta.get("descricao_recebida", ""),
+                    "Fornecedor": oferta.get("fornecedor", ""),
+                    "Pendência": motivo,
+                    "Ação sugerida": acao,
+                    "Impacto": "Oferta desconsiderada pelo motor",
+                }
+            )
+    return pendencias
+
+
+def _historico_atualizado(historico: pd.DataFrame, ofertas: pd.DataFrame) -> pd.DataFrame:
+    anterior_interno = historico.copy() if historico is not None else pd.DataFrame()
+    if anterior_interno.empty:
+        anterior = pd.DataFrame()
+    elif "ID da carga" in anterior_interno.columns:
+        anterior = anterior_interno.copy()
+    else:
+        anterior = pd.DataFrame(
+            {
+                "Data processamento": _col(anterior_interno, "data_processamento"),
+                "Data da carga": _col(anterior_interno, "data_carga"),
+                "ID da carga": _col(anterior_interno, "id_carga"),
+                "Fornecedor": _col(anterior_interno, "fornecedor"),
+                "Tipo operação": _col(anterior_interno, "tipo_operacao"),
+                "OL / Indústria": _col(anterior_interno, "ol_industria"),
+                "SKU identificado": _col(anterior_interno, "sku").map(texto_codigo),
+                "EAN tratado": _col(anterior_interno, "ean").map(texto_codigo),
+                "EAN original": _col(anterior_interno, "ean_original").map(texto_codigo),
+                "Descrição recebida": _col(anterior_interno, "descricao_recebida"),
+                "Descrição oficial": _col(anterior_interno, "descricao_oficial"),
+                "Fabricante": _col(anterior_interno, "fabricante"),
+                "Categoria": _col(anterior_interno, "categoria"),
+                "Preço Fábrica": _col(anterior_interno, "preco_fabrica").map(numero),
+                "Desconto": _col(anterior_interno, "desconto").map(numero),
+                "Preço Final": _col(anterior_interno, "preco_final").map(numero),
+                "Tipo preço": _col(anterior_interno, "tipo_preco"),
+                "Caixaria final": _col(anterior_interno, "caixaria").map(numero),
+                "Múltiplo": _col(anterior_interno, "multiplo").map(numero),
+                "Estoque fornecedor": _col(anterior_interno, "estoque_fornecedor").map(numero),
+                "Preço unitário": _col(anterior_interno, "preco_unitario").map(numero),
+                "Status EAN": _col(anterior_interno, "status_ean"),
+                "Status fornecedor": _col(anterior_interno, "status_fornecedor"),
+                "Status homologação OL": _col(anterior_interno, "status_homologacao"),
+                "Observação sistema": _col(anterior_interno, "observacao_sistema"),
+            }
+        )
+    agora = datetime.now()
+    novos = pd.DataFrame(
+        {
+            "Data processamento": [agora] * len(ofertas),
+            "Data da carga": _col(ofertas, "data_carga"),
+            "ID da carga": _col(ofertas, "id_carga"),
+            "Fornecedor": _col(ofertas, "fornecedor"),
+            "Tipo operação": _col(ofertas, "tipo_operacao"),
+            "OL / Indústria": _col(ofertas, "ol_industria"),
+            "SKU identificado": _col(ofertas, "sku").map(texto_codigo),
+            "EAN tratado": _col(ofertas, "ean").map(texto_codigo),
+            "EAN original": _col(ofertas, "ean_original").map(texto_codigo),
+            "Descrição recebida": _col(ofertas, "descricao_recebida"),
+            "Descrição oficial": _col(ofertas, "descricao_oficial"),
+            "Fabricante": _col(ofertas, "fabricante"),
+            "Categoria": _col(ofertas, "categoria"),
+            "Preço Fábrica": _col(ofertas, "preco_fabrica").map(numero),
+            "Desconto": _col(ofertas, "desconto").map(numero),
+            "Preço Final": _col(ofertas, "preco_final").map(numero),
+            "Tipo preço": _col(ofertas, "tipo_preco"),
+            "Caixaria final": _col(ofertas, "caixaria").map(numero),
+            "Múltiplo": _col(ofertas, "multiplo").map(numero),
+            "Estoque fornecedor": _col(ofertas, "estoque_fornecedor").map(numero),
+            "Preço unitário": _col(ofertas, "preco_unitario").map(numero),
+            "Status EAN": _col(ofertas, "status_ean"),
+            "Status fornecedor": _col(ofertas, "status_fornecedor"),
+            "Status homologação OL": _col(ofertas, "status_homologacao"),
+            "Observação sistema": _col(ofertas, "motivos_rejeicao"),
+        }
+    )
+    combinado = pd.concat([anterior, novos], ignore_index=True, sort=False)
+    chaves = [c for c in ["ID da carga", "Fornecedor", "EAN tratado", "SKU identificado", "Preço unitário"] if c in combinado.columns]
+    if chaves:
+        combinado = combinado.drop_duplicates(subset=chaves, keep="last")
+    return combinado.reset_index(drop=True)
+
+
+def executar_motor(
+    cotacao: pd.DataFrame,
+    necessidade: pd.DataFrame,
+    cadastro: pd.DataFrame,
+    regras_fornecedor: pd.DataFrame,
+    homologacao_ol: pd.DataFrame | None = None,
+    historico: pd.DataFrame | None = None,
+    fornecedores_desativados: Iterable[str] = (),
+) -> ResultadoMotor:
+    homologacao_ol = homologacao_ol if homologacao_ol is not None else pd.DataFrame()
+    historico = historico if historico is not None else pd.DataFrame()
+
+    cadastro_n = _normalizar_cadastro(cadastro)
+    regras_n = _normalizar_regras(regras_fornecedor, fornecedores_desativados)
+    necessidade_n = _preparar_necessidade(necessidade, cadastro_n)
+    ofertas = _preparar_ofertas(cotacao, cadastro_n, regras_n, homologacao_ol)
+
+    pendencias = _pendencias_ofertas(ofertas)
+    pedido_linhas: list[dict] = []
+    opcoes_linhas: list[dict] = []
+
+    for _, item in necessidade_n.iterrows():
+        sku = texto_codigo(item.get("sku"))
+        ean = texto_codigo(item.get("ean"))
+        qtd = int(item.get("quantidade_ajustada", 0))
+
+        if not bool(item.get("ean_encontrado")):
+            pendencias.append(
+                {
+                    "SKU": sku,
+                    "EAN": ean,
+                    "Descrição": item.get("descricao", ""),
+                    "Fornecedor": "",
+                    "Pendência": "EAN não encontrado",
+                    "Ação sugerida": "Cadastrar o EAN no cadastro EAN/SKU.",
+                    "Impacto": "Item não entra no pedido",
+                }
+            )
+            continue
+
+        atuais = ofertas[(ofertas["sku"] == sku) & (ofertas["valida"])].copy()
+        atuais["atende_total"] = atuais["estoque_fornecedor"] >= qtd
+
+        precisa_busca = bool(item.get("ruptura_cronica_bool")) and (atuais.empty or not atuais["atende_total"].any())
+        ampliadas = _ofertas_historico(historico, sku, regras_n, qtd) if precisa_busca else pd.DataFrame()
+        candidatas = pd.concat([atuais, ampliadas], ignore_index=True, sort=False)
+        if not candidatas.empty:
+            candidatas = candidatas.drop_duplicates(subset=["fornecedor", "preco_unitario", "estoque_fornecedor"], keep="first")
+            candidatas = candidatas.sort_values(
+                by=["preco_unitario", "estoque_fornecedor"], ascending=[True, False], na_position="last"
+            ).reset_index(drop=True)
+
+        if candidatas.empty:
+            pendencias.append(
+                {
+                    "SKU": sku,
+                    "EAN": ean,
+                    "Descrição": item.get("descricao", ""),
+                    "Fornecedor": "",
+                    "Pendência": "Sem oferta válida",
+                    "Ação sugerida": "Revisar cotação, regras e homologações.",
+                    "Impacto": "Item não entra no pedido",
+                }
+            )
+            continue
+
+        top4 = candidatas.head(4).copy()
+        completas = candidatas[candidatas["estoque_fornecedor"] >= qtd]
+        if not completas.empty:
+            recomendada = completas.iloc[0]
+            status = "Busca ampliada" if recomendada.get("origem") == "Busca ampliada" else "OK"
+        else:
+            recomendada = candidatas.sort_values("estoque_fornecedor", ascending=False).iloc[0]
+            status = "Pendente"
+            pendencias.append(
+                {
+                    "SKU": sku,
+                    "EAN": ean,
+                    "Descrição": item.get("descricao", ""),
+                    "Fornecedor": recomendada.get("fornecedor", ""),
+                    "Pendência": "Sem estoque suficiente",
+                    "Ação sugerida": "Negociar atendimento parcial ou buscar nova oferta.",
+                    "Impacto": f"Necessidade {qtd}; maior estoque encontrado {int(recomendada.get('estoque_fornecedor', 0))}",
+                }
+            )
+
+        opcao1 = top4.iloc[0]
+        ultimo_custo = numero(item.get("ultimo_custo"), 0)
+        variacao1 = (numero(opcao1.get("preco_unitario")) / ultimo_custo - 1) if ultimo_custo > 0 else None
+        variacao_rec = (numero(recomendada.get("preco_unitario")) / ultimo_custo - 1) if ultimo_custo > 0 else None
+        nova = normalizar_texto(opcao1.get("fornecedor")) != normalizar_texto(recomendada.get("fornecedor"))
+
+        pedido_linhas.append(
+            {
+                "Loja": 1015,
+                "Ciclo": datetime.now().strftime("%Y%m%d") + "/p1",
+                "Tratativa": "",
+                "Fabricante ": item.get("fabricante", ""),
+                "Categoria ": item.get("categoria", ""),
+                "Condição Pagamento": opcao1.get("prazo_pagamento", ""),
+                "Condição Leilão": 1,
+                "Código Fornecedor": texto_codigo(opcao1.get("codigo_fornecedor")),
+                "Prazo Pagamento": opcao1.get("prazo_pagamento", ""),
+                "SKU": sku,
+                "EAN": ean,
+                "Tipo de Produto": item.get("categoria", ""),
+                "Descrição": item.get("descricao_oficial") or item.get("descricao", ""),
+                "Quantidade Solicitada": qtd,
+                "Variação 1": variacao1,
+                "Status ": "Opção 1 atende" if int(opcao1.get("estoque_fornecedor", 0)) >= qtd else "Tratar - atende parcial",
+                "Novo Fornecedor ": recomendada.get("fornecedor", "") if nova else "",
+                "Novo Código Fornecedor ": texto_codigo(recomendada.get("codigo_fornecedor")) if nova else "",
+                "Nova Variação": variacao_rec if nova else None,
+                "Unidade": "UN",
+                "Preço": numero(opcao1.get("preco_unitario")),
+                "Prazo Entrega": opcao1.get("lead_time", ""),
+                "Embalagem": int(item.get("multiplo", 1)),
+                "Tipo Condição": "",
+                "ComercialDiscount": 0,
+                "FinancialDiscount": 0,
+                "E-Mail": opcao1.get("email", ""),
+                "NR COTAÇÃO": opcao1.get("id_carga", ""),
+                "Comprador ": item.get("comprador", ""),
+                "Fornecedor recomendado": recomendada.get("fornecedor", ""),
+                "Preço recomendado": numero(recomendada.get("preco_unitario")),
+                "Estoque recomendado": int(recomendada.get("estoque_fornecedor", 0)),
+                "Origem recomendada": recomendada.get("origem", ""),
+                "Status motor": status,
+                "Valor total": numero(recomendada.get("preco_unitario")) * qtd,
+            }
+        )
+
+        linha_opcoes = {"SKU": sku, "Quantidade solicitada": qtd}
+        for posicao in range(1, 5):
+            if posicao <= len(top4):
+                oferta = top4.iloc[posicao - 1]
+                variacao = (numero(oferta.get("preco_unitario")) / ultimo_custo - 1) if ultimo_custo > 0 else None
+                linha_opcoes.update(
+                    {
+                        f"Código fornecedor {posicao}": texto_codigo(oferta.get("codigo_fornecedor")),
+                        f"Fornecedor {posicao}": oferta.get("fornecedor", ""),
+                        f"Estoque {posicao}": int(oferta.get("estoque_fornecedor", 0)),
+                        f"Preço {posicao}": numero(oferta.get("preco_unitario")),
+                        f"Variação custo {posicao}": variacao,
+                    }
+                )
+            else:
+                linha_opcoes.update(
+                    {
+                        f"Código fornecedor {posicao}": "",
+                        f"Fornecedor {posicao}": "",
+                        f"Estoque {posicao}": "",
+                        f"Preço {posicao}": "",
+                        f"Variação custo {posicao}": "",
+                    }
+                )
+        opcoes_linhas.append(linha_opcoes)
+
+    pedido = pd.DataFrame(pedido_linhas)
+    opcoes = pd.DataFrame(opcoes_linhas)
+    pendencias_df = pd.DataFrame(pendencias).drop_duplicates().reset_index(drop=True) if pendencias else pd.DataFrame(
+        columns=["SKU", "EAN", "Descrição", "Fornecedor", "Pendência", "Ação sugerida", "Impacto"]
+    )
+    historico_atualizado = _historico_atualizado(historico, ofertas)
+
+    valor_total = numero(pedido.get("Valor total", pd.Series(dtype=float)).sum(), 0) if not pedido.empty else 0
+    por_fornecedor = (
+        pedido.groupby("Fornecedor recomendado", dropna=False)["Valor total"].sum().sort_values(ascending=False).reset_index()
+        if not pedido.empty
+        else pd.DataFrame(columns=["Fornecedor recomendado", "Valor total"])
+    )
+    motivos = (
+        pendencias_df["Pendência"].value_counts().rename_axis("Pendência").reset_index(name="Quantidade")
+        if not pendencias_df.empty
+        else pd.DataFrame(columns=["Pendência", "Quantidade"])
+    )
+    resumo = {
+        "processado_em": datetime.now(),
+        "valor_total": valor_total,
+        "skus_necessidade": len(necessidade_n),
+        "skus_pedido": len(pedido),
+        "pendencias": len(pendencias_df),
+        "sem_oferta": int((pendencias_df["Pendência"] == "Sem oferta válida").sum()) if not pendencias_df.empty else 0,
+        "fornecedores": int(pedido["Fornecedor recomendado"].nunique()) if not pedido.empty else 0,
+        "busca_ampliada": int((pedido["Origem recomendada"] == "Busca ampliada").sum()) if not pedido.empty else 0,
+        "por_fornecedor": por_fornecedor,
+        "motivos_pendencia": motivos,
+    }
+
+    return ResultadoMotor(
+        pedido=pedido,
+        opcoes=opcoes,
+        pendencias=pendencias_df,
+        historico=historico_atualizado,
+        ofertas_tratadas=ofertas,
+        resumo=resumo,
+    )
