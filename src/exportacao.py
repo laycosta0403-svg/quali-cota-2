@@ -118,6 +118,10 @@ def dataframe_para_excel(abas: dict[str, pd.DataFrame]) -> bytes:
 def gerar_resumo_excel(resultado: ResultadoMotor) -> bytes:
     indicadores = pd.DataFrame(
         [
+            ["ID da carga", resultado.id_carga],
+            ["Aba da necessidade", resultado.diagnostico.get("aba_necessidade", "")],
+            ["SKUs com Pedido Efetivo", resultado.diagnostico.get("skus_com_pedido", 0)],
+            ["Unidades solicitadas", resultado.diagnostico.get("unidades_solicitadas", 0)],
             ["Valor total", resultado.resumo["valor_total"]],
             ["SKUs na necessidade", resultado.resumo["skus_necessidade"]],
             ["SKUs no pedido", resultado.resumo["skus_pedido"]],

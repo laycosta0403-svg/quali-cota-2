@@ -13,7 +13,7 @@ st.caption("Execute o motor e gere os quatro outputs oficiais da rodada.")
 
 st.info(
     "A integração automática com o SharePoint continua pausada aguardando o TI. "
-    "Nesta etapa, os arquivos são enviados manualmente apenas para validar o motor."
+    "Nesta etapa, os arquivos são enviados manualmente para validar o motor."
 )
 
 st.markdown("### 1. Arquivos da rodada")
@@ -27,6 +27,7 @@ necessidade = st.file_uploader(
     "Necessidade de compra",
     type=["xlsx", "xlsb", "csv"],
     accept_multiple_files=False,
+    help='O sistema usa obrigatoriamente a aba cujo nome contém "Volume de Compras".',
 )
 
 with st.expander("Bases técnicas do motor", expanded=False):
@@ -51,8 +52,8 @@ st.markdown("### 2. Processar")
 if st.button("⚙️ Processar motor", type="primary", use_container_width=True, disabled=not pronto):
     desativados = [linha.strip() for linha in desativados_texto.splitlines() if linha.strip()]
     etapas = [
-        "Lendo os arquivos",
-        "Validando EANs e fornecedores",
+        "Lendo a aba Volume de Compras",
+        "Validando Pedido Efetivo, EANs e fornecedores",
         "Classificando as quatro melhores opções",
         "Gerando pedido, pendências, histórico e resumo",
     ]
@@ -75,7 +76,8 @@ if st.button("⚙️ Processar motor", type="primary", use_container_width=True,
         status.write(f"**{etapas[-1]}...**")
         barra.progress(1.0)
         st.session_state["qc_resultado"] = resultado
-        status.success("Rodada processada com sucesso.")
+        st.session_state.pop("qc_download", None)
+        status.success(f"Rodada processada com sucesso. ID da carga: {resultado.id_carga}")
         st.toast("Dashboard e Busca atualizados.", icon="✅")
     except Exception as exc:
         status.error(f"Não foi possível concluir o processamento: {exc}")
@@ -88,6 +90,17 @@ resultado = st.session_state.get("qc_resultado")
 if resultado is not None:
     st.divider()
     st.markdown("### 3. Resultado da rodada")
+    st.success(f"**ID da carga:** `{resultado.id_carga}`")
+
+    diagnostico = resultado.diagnostico
+    st.info(
+        f'**Aba lida:** {diagnostico.get("aba_necessidade", "—")}  ·  '
+        f'**SKUs com Pedido Efetivo:** {diagnostico.get("skus_com_pedido", 0):,}  ·  '
+        f'**Unidades solicitadas:** {diagnostico.get("unidades_solicitadas", 0):,}  ·  '
+        f'**Linhas da cotação:** {diagnostico.get("linhas_cotacao", 0):,}'
+        .replace(",", ".")
+    )
+
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("SKUs no pedido", resultado.resumo["skus_pedido"])
     r2.metric("Pendências", resultado.resumo["pendencias"])
@@ -99,56 +112,68 @@ if resultado is not None:
     )
 
     with aba_pedido:
-        st.caption("Prévia do fornecedor recomendado. As quatro opções completas ficam na aba Estoques_Fornecedores do Excel.")
+        st.caption(
+            "Prévia limitada às primeiras 300 linhas. As quatro opções completas ficam "
+            "na aba Estoques_Fornecedores do Excel."
+        )
         colunas = [
-            "SKU", "EAN", "Descrição", "Quantidade Solicitada", "Fornecedor recomendado",
-            "Preço recomendado", "Estoque recomendado", "Origem recomendada", "Status motor",
+            "ID da carga", "SKU", "EAN", "Descrição", "Quantidade Solicitada",
+            "Fornecedor recomendado", "Preço recomendado", "Estoque recomendado",
+            "Origem recomendada", "Status motor",
         ]
-        st.dataframe(resultado.pedido.reindex(columns=colunas), use_container_width=True, hide_index=True)
+        st.dataframe(
+            resultado.pedido.reindex(columns=colunas).head(300),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     with aba_pendencias:
-        st.dataframe(resultado.pendencias, use_container_width=True, hide_index=True)
+        st.caption("Prévia limitada às primeiras 500 pendências consolidadas por SKU.")
+        st.dataframe(resultado.pendencias.head(500), use_container_width=True, hide_index=True)
 
     with aba_historico:
-        st.dataframe(resultado.historico.tail(500), use_container_width=True, hide_index=True)
+        st.caption("Prévia das 300 linhas mais recentes do histórico.")
+        st.dataframe(resultado.historico.tail(300), use_container_width=True, hide_index=True)
 
     with aba_resumo:
         st.dataframe(resultado.resumo["por_fornecedor"], use_container_width=True, hide_index=True)
         st.dataframe(resultado.resumo["motivos_pendencia"], use_container_width=True, hide_index=True)
 
-    template = Path(__file__).resolve().parents[1] / "templates" / "Modelo Envio Pedidos Fornecedor_Medicamentos.xlsx"
-    pedido_bytes = gerar_pedido_unificado(resultado, template)
-    pendencias_bytes = dataframe_para_excel({"PENDENCIAS": resultado.pendencias})
-    historico_bytes = dataframe_para_excel({"HISTORICO_COTACAO": resultado.historico})
-    resumo_bytes = gerar_resumo_excel(resultado)
-
     st.markdown("### 4. Downloads")
-    d1, d2, d3, d4 = st.columns(4)
-    d1.download_button(
-        "⬇️ Pedido unificado",
-        data=pedido_bytes,
-        file_name="Pedido_Unificado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+    st.caption("Para poupar memória, o app prepara somente um arquivo por vez.")
+    tipo_download = st.selectbox(
+        "Arquivo a preparar",
+        ["Pedido unificado", "Pendências", "Histórico", "Resumo"],
     )
-    d2.download_button(
-        "⬇️ Pendências",
-        data=pendencias_bytes,
-        file_name="Pendencias.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-    d3.download_button(
-        "⬇️ Histórico",
-        data=historico_bytes,
-        file_name="Historico_Cotacao.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-    d4.download_button(
-        "⬇️ Resumo",
-        data=resumo_bytes,
-        file_name="Resumo_Rodada.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+
+    if st.button("Preparar arquivo selecionado", use_container_width=True):
+        with st.spinner(f"Preparando {tipo_download.lower()}..."):
+            template = Path(__file__).resolve().parents[1] / "templates" / "Modelo Envio Pedidos Fornecedor_Medicamentos.xlsx"
+            if tipo_download == "Pedido unificado":
+                dados = gerar_pedido_unificado(resultado, template)
+                nome = f"Pedido_Unificado_{resultado.id_carga}.xlsx"
+            elif tipo_download == "Pendências":
+                dados = dataframe_para_excel({"PENDENCIAS": resultado.pendencias})
+                nome = f"Pendencias_{resultado.id_carga}.xlsx"
+            elif tipo_download == "Histórico":
+                dados = dataframe_para_excel({"HISTORICO_COTACAO": resultado.historico})
+                nome = f"Historico_Cotacao_{resultado.id_carga}.xlsx"
+            else:
+                dados = gerar_resumo_excel(resultado)
+                nome = f"Resumo_Rodada_{resultado.id_carga}.xlsx"
+            st.session_state["qc_download"] = {
+                "id_carga": resultado.id_carga,
+                "tipo": tipo_download,
+                "nome": nome,
+                "dados": dados,
+            }
+
+    download = st.session_state.get("qc_download")
+    if download and download.get("id_carga") == resultado.id_carga:
+        st.download_button(
+            f'⬇️ Baixar {download["tipo"]}',
+            data=download["dados"],
+            file_name=download["nome"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )

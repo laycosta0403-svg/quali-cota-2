@@ -110,19 +110,30 @@ def _mapear_colunas(colunas: Iterable[object], aliases: Mapping[str, Sequence[st
     for destino, opcoes in aliases.items():
         candidatos = [normalizar_texto(opcao) for opcao in opcoes]
         escolhido = None
-        for coluna, norm in normalizadas.items():
-            if coluna not in colunas_usadas and norm in candidatos:
-                escolhido = coluna
+
+        # Respeita a ordem dos aliases. Isso é importante quando existem, por
+        # exemplo, "EAN" e "EAN DE COMPR." na mesma aba: o alias mais específico
+        # deve vencer, independentemente da posição física da coluna.
+        for candidato in candidatos:
+            for coluna, norm in normalizadas.items():
+                if coluna not in colunas_usadas and norm == candidato:
+                    escolhido = coluna
+                    break
+            if escolhido is not None:
                 break
+
         if escolhido is None:
             # Fuzzy apenas para aliases com pelo menos duas palavras, evitando que
             # "Fornecedor" seja confundido com "Código fornecedor".
             candidatos_longos = [c for c in candidatos if len(c.split()) >= 2]
-            for coluna, norm in normalizadas.items():
-                if coluna in colunas_usadas:
-                    continue
-                if any(candidato and (candidato in norm or norm in candidato) for candidato in candidatos_longos):
-                    escolhido = coluna
+            for candidato in candidatos_longos:
+                for coluna, norm in normalizadas.items():
+                    if coluna in colunas_usadas:
+                        continue
+                    if candidato and (candidato in norm or norm in candidato):
+                        escolhido = coluna
+                        break
+                if escolhido is not None:
                     break
         if escolhido is not None:
             resultado[escolhido] = destino
@@ -134,6 +145,8 @@ def ler_tabela(
     source: Source,
     aliases: Mapping[str, Sequence[str]],
     abas_preferidas: Sequence[str] = (),
+    aba_obrigatoria: str | None = None,
+    exigir_colunas: Sequence[str] = (),
 ) -> pd.DataFrame:
     nome = _nome_arquivo(source).lower()
     if nome.endswith(".csv"):
@@ -141,13 +154,23 @@ def ler_tabela(
     else:
         abas = listar_abas(source)
 
-    ordenadas: list[str] = []
-    for preferida in abas_preferidas:
-        preferida_norm = normalizar_texto(preferida)
-        ordenadas.extend([aba for aba in abas if preferida_norm in normalizar_texto(aba)])
-    ordenadas.extend([aba for aba in abas if aba not in ordenadas])
+    if aba_obrigatoria and abas != ["CSV"]:
+        alvo = normalizar_texto(aba_obrigatoria)
+        correspondentes = [aba for aba in abas if alvo in normalizar_texto(aba)]
+        if not correspondentes:
+            raise ValueError(
+                f'A aba obrigatória contendo "{aba_obrigatoria}" não foi encontrada. '
+                f'Abas disponíveis: {", ".join(abas)}'
+            )
+        ordenadas = correspondentes
+    else:
+        ordenadas: list[str] = []
+        for preferida in abas_preferidas:
+            preferida_norm = normalizar_texto(preferida)
+            ordenadas.extend([aba for aba in abas if preferida_norm in normalizar_texto(aba)])
+        ordenadas.extend([aba for aba in abas if aba not in ordenadas])
 
-    melhor: tuple[int, pd.DataFrame] | None = None
+    melhor: tuple[int, pd.DataFrame, str, int, set[str]] | None = None
     ultimo_erro: Exception | None = None
     for aba in ordenadas:
         try:
@@ -159,15 +182,27 @@ def ler_tabela(
             dados = dados.dropna(how="all").reset_index(drop=True)
             mapa = _mapear_colunas(dados.columns, aliases)
             dados = dados.rename(columns=mapa)
-            reconhecidas = len(set(mapa.values()))
+            reconhecidas_set = set(mapa.values())
+            reconhecidas = len(reconhecidas_set)
             if melhor is None or reconhecidas > melhor[0]:
-                melhor = (reconhecidas, dados)
+                melhor = (reconhecidas, dados, aba, header, reconhecidas_set)
         except Exception as exc:  # pragma: no cover - tenta outras abas
             ultimo_erro = exc
 
     if melhor is None:
         raise ValueError(f"Não foi possível ler o arquivo: {ultimo_erro}")
-    return melhor[1]
+
+    _, dados, aba_lida, header, reconhecidas_set = melhor
+    faltantes = [coluna for coluna in exigir_colunas if coluna not in reconhecidas_set]
+    if faltantes:
+        raise ValueError(
+            f'A aba "{aba_lida}" foi encontrada, mas faltam colunas obrigatórias: '
+            f'{", ".join(faltantes)}.'
+        )
+    dados.attrs["aba_lida"] = aba_lida
+    dados.attrs["linha_cabecalho"] = header + 1
+    dados.attrs["colunas_reconhecidas"] = sorted(reconhecidas_set)
+    return dados
 
 
 def dividir_eans(valor: object) -> list[str]:
@@ -198,21 +233,24 @@ ALIASES_COTACAO = {
 
 ALIASES_NECESSIDADE = {
     "data_necessidade": ["Data da necessidade", "Data necessidade"],
-    "sku": ["SKU", "Código produto", "Código interno"],
-    "ean": ["EAN", "Código de barras"],
+    "sku": ["CÓD", "COD", "SKU", "Código produto", "Código interno", "Código"],
+    "ean": ["EAN DE COMPR.", "EAN DE COMPRA", "EAN compra", "EAN", "Código de barras"],
     "descricao": ["Descrição", "Produto", "Nome"],
-    "quantidade_solicitada": ["Quantidade solicitada", "Qtd.Solic", "Qtd solicitada", "Necessidade"],
+    "quantidade_solicitada": [
+        "Pedido Efetivo", "Quantidade solicitada", "Qtd.Solic", "Qtd solicitada", "Necessidade"
+    ],
     "curva": ["Curva"],
     "ruptura": ["Ruptura?", "Ruptura"],
-    "ruptura_cronica": ["Ruptura crônica?", "Ruptura crônica", "Ruptura Cronico"],
-    "vmd": ["VMD", "Venda média diária"],
-    "dde": ["DDE"],
+    "ruptura_cronica": ["Ruptura crônica?", "Ruptura crônica", "Ruptura Cronico", "Ruptura"],
+    "vmd": ["VMD Final", "VMD", "Venda média diária"],
+    "dde": ["DDE Atual", "DDE"],
     "estoque_atual": ["Estoque atual", "Estoque"],
     "pmz": ["PMZ"],
     "ultimo_custo": ["Último custo", "Ultimo custo", "Custo"],
     "categoria": ["Categoria"],
     "fabricante": ["Fabricante"],
     "comprador": ["Comprador"],
+    "caixaria": ["CAIXARIA", "Caixaria", "Múltiplo", "Multiplo"],
 }
 
 ALIASES_CADASTRO = {

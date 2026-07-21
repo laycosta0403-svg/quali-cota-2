@@ -52,7 +52,11 @@ class TestMotor(unittest.TestCase):
         self.assertEqual(por_sku.loc["2", "Fornecedor recomendado"], "Solfarma")
         self.assertEqual(por_sku.loc["3", "Quantidade Solicitada"], 20)
         self.assertAlmostEqual(float(por_sku.loc["3", "Preço recomendado"]), 20.0)
-        self.assertIn("Fornecedor bloqueado", set(resultado.pendencias["Pendência"]))
+        # A oferta bloqueada fica registrada no histórico, mas não vira pendência
+        # quando existe outra opção válida para o SKU.
+        self.assertNotIn("Fornecedor bloqueado", set(resultado.pendencias.get("Pendência", [])))
+        self.assertTrue(resultado.id_carga.startswith("QDC_"))
+        self.assertEqual(set(resultado.pedido["NR COTAÇÃO"]), {resultado.id_carga})
 
     def test_template_mantem_estrutura(self) -> None:
         resultado = executar_motor(self.cotacao, self.necessidade, self.cadastro, self.regras)
