@@ -4,19 +4,22 @@ import pandas as pd
 import streamlit as st
 
 from src.leitura import normalizar_texto
+from src.persistencia import carregar_metadata, carregar_tabela, obter_ultimo_id
 
 
 st.title("🔎 Busca")
 st.caption("Pesquise por SKU, EAN, descrição ou fornecedor em um único lugar.")
 
-resultado = st.session_state.get("qc_resultado")
-if resultado is None:
+id_carga = st.session_state.get("qc_id_carga") or obter_ultimo_id()
+metadata = carregar_metadata(id_carga)
+if metadata is None:
     st.info("Processe uma rodada para habilitar a busca real.")
     st.stop()
 
+id_carga = str(metadata["id_carga"])
 termo = st.text_input("O que você quer consultar?", placeholder="Digite SKU, EAN, descrição ou fornecedor")
 if not termo:
-    st.info("Digite um termo para visualizar as opções atuais e o histórico.")
+    st.info(f"Última rodada disponível: {id_carga}. Digite um termo para pesquisar.")
     st.stop()
 
 termo_norm = normalizar_texto(termo)
@@ -32,10 +35,10 @@ def filtrar(df: pd.DataFrame, colunas: list[str]) -> pd.DataFrame:
     return df[mascara].copy()
 
 
-pedido = filtrar(resultado.pedido, ["SKU", "EAN", "Descrição", "Fornecedor recomendado"])
-opcoes = filtrar(resultado.opcoes, ["SKU", "Fornecedor 1", "Fornecedor 2", "Fornecedor 3", "Fornecedor 4"])
+pedido = filtrar(carregar_tabela("pedido", id_carga), ["SKU", "EAN", "Descrição", "Fornecedor recomendado"])
+opcoes = filtrar(carregar_tabela("opcoes", id_carga), ["SKU", "Fornecedor 1", "Fornecedor 2", "Fornecedor 3", "Fornecedor 4"])
 historico = filtrar(
-    resultado.historico,
+    carregar_tabela("historico", id_carga),
     ["SKU identificado", "EAN tratado", "Descrição oficial", "Fornecedor"],
 )
 
@@ -46,10 +49,10 @@ r2.metric("Linhas de opções", len(opcoes))
 r3.metric("Registros no histórico", len(historico))
 
 st.markdown("#### Pedido e recomendação")
-st.dataframe(pedido, use_container_width=True, hide_index=True)
+st.dataframe(pedido, width="stretch", hide_index=True)
 
 st.markdown("#### Quatro melhores opções")
-st.dataframe(opcoes, use_container_width=True, hide_index=True)
+st.dataframe(opcoes, width="stretch", hide_index=True)
 
 st.markdown("#### Histórico")
-st.dataframe(historico.tail(300), use_container_width=True, hide_index=True)
+st.dataframe(historico.tail(300), width="stretch", hide_index=True)

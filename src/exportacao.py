@@ -45,7 +45,7 @@ def _copiar_estilo_linha(ws, origem: int, destino: int, total_colunas: int) -> N
             cel_destino.protection = copy(cel_origem.protection)
 
 
-def gerar_pedido_unificado(resultado: ResultadoMotor, template_path: str | Path) -> bytes:
+def gerar_pedido_unificado_arquivo(resultado: ResultadoMotor, template_path: str | Path, destino: str | Path) -> Path:
     wb = load_workbook(template_path, keep_links=False, data_only=False)
     ws_base = wb["Base"]
     ws_opcoes = wb["Estoques_Fornecedores"]
@@ -95,14 +95,24 @@ def gerar_pedido_unificado(resultado: ResultadoMotor, template_path: str | Path)
     wb.calculation.forceFullCalc = False
     wb.calculation.calcMode = "manual"
 
-    buffer = BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
+    destino = Path(destino)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(destino)
+    wb.close()
+    return destino
 
 
-def dataframe_para_excel(abas: dict[str, pd.DataFrame]) -> bytes:
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+def gerar_pedido_unificado(resultado: ResultadoMotor, template_path: str | Path) -> bytes:
+    from tempfile import NamedTemporaryFile
+    with NamedTemporaryFile(suffix=".xlsx") as tmp:
+        gerar_pedido_unificado_arquivo(resultado, template_path, tmp.name)
+        return Path(tmp.name).read_bytes()
+
+
+def dataframe_para_excel_arquivo(abas: dict[str, pd.DataFrame], destino: str | Path) -> Path:
+    destino = Path(destino)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(destino, engine="xlsxwriter") as writer:
         for nome, df in abas.items():
             nome_seguro = nome[:31]
             df.to_excel(writer, sheet_name=nome_seguro, index=False)
@@ -112,10 +122,17 @@ def dataframe_para_excel(abas: dict[str, pd.DataFrame]) -> bytes:
             for idx, coluna in enumerate(df.columns):
                 largura = min(max(12, len(str(coluna)) + 2), 42)
                 ws.set_column(idx, idx, largura)
-    return buffer.getvalue()
+    return destino
 
 
-def gerar_resumo_excel(resultado: ResultadoMotor) -> bytes:
+def dataframe_para_excel(abas: dict[str, pd.DataFrame]) -> bytes:
+    from tempfile import NamedTemporaryFile
+    with NamedTemporaryFile(suffix=".xlsx") as tmp:
+        dataframe_para_excel_arquivo(abas, tmp.name)
+        return Path(tmp.name).read_bytes()
+
+
+def gerar_resumo_excel_arquivo(resultado: ResultadoMotor, destino: str | Path) -> Path:
     indicadores = pd.DataFrame(
         [
             ["ID da carga", resultado.id_carga],
@@ -131,10 +148,18 @@ def gerar_resumo_excel(resultado: ResultadoMotor) -> bytes:
         ],
         columns=["Indicador", "Valor"],
     )
-    return dataframe_para_excel(
+    return dataframe_para_excel_arquivo(
         {
             "Resumo": indicadores,
             "Por fornecedor": resultado.resumo["por_fornecedor"],
             "Motivos pendência": resultado.resumo["motivos_pendencia"],
-        }
+        },
+        destino,
     )
+
+
+def gerar_resumo_excel(resultado: ResultadoMotor) -> bytes:
+    from tempfile import NamedTemporaryFile
+    with NamedTemporaryFile(suffix=".xlsx") as tmp:
+        gerar_resumo_excel_arquivo(resultado, tmp.name)
+        return Path(tmp.name).read_bytes()
