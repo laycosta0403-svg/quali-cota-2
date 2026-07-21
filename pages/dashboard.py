@@ -6,6 +6,7 @@ import streamlit as st
 
 from src.demo_data import compra_distribuidor_demo, kpis_demo, variacoes_demo
 from src.persistencia import carregar_metadata, carregar_tabela, obter_ultimo_id
+from src.tempo import FUSO_BRASIL
 
 
 st.title("📊 Dashboard")
@@ -32,7 +33,15 @@ else:
     }
     por_fornecedor = carregar_tabela("por_fornecedor", str(metadata["id_carga"]))
     processado_em_raw = resumo.get("processado_em")
-    processado_em = pd.Timestamp(processado_em_raw).strftime("%d/%m/%Y %H:%M") if processado_em_raw else "—"
+    if processado_em_raw:
+        timestamp = pd.Timestamp(processado_em_raw)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC").tz_convert(FUSO_BRASIL)
+        else:
+            timestamp = timestamp.tz_convert(FUSO_BRASIL)
+        processado_em = timestamp.strftime("%d/%m/%Y %H:%M")
+    else:
+        processado_em = "—"
     pedido = carregar_tabela("pedido", str(metadata["id_carga"]))
     pedido["Variação"] = pd.to_numeric(pedido.get("Variação 1"), errors="coerce") * 100
     pedido["Descrição"] = pedido.get("Descrição", "")
@@ -54,7 +63,15 @@ st.markdown(
 )
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Valor da compra", f"R$ {kpis['valor_total']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+valor_total = float(kpis["valor_total"])
+valor_exibido = (
+    f"R$ {valor_total / 1_000_000:.1f} mi".replace(".", ",")
+    if valor_total >= 1_000_000
+    else f"R$ {valor_total / 1_000:.1f} mil".replace(".", ",")
+    if valor_total >= 100_000
+    else f"R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+)
+c1.metric("Valor da compra", valor_exibido, help=f"Valor exato: R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 c2.metric("SKUs no pedido", f"{int(kpis['skus_pedido']):,}".replace(",", "."))
 c3.metric("Pendências", f"{int(kpis['pendencias']):,}".replace(",", "."))
 c4.metric("Sem oferta", f"{int(kpis['sem_cotacao']):,}".replace(",", "."))

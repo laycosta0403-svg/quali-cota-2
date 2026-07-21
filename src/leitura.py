@@ -219,6 +219,8 @@ ALIASES_COTACAO = {
     "fornecedor": ["Fornecedor", "Distribuidor"],
     "codigo_fornecedor": ["Código fornecedor", "Cod fornecedor", "Código do fornecedor"],
     "tipo_operacao": ["Tipo operação", "Tipo de operação"],
+    "como_comprar": ["Como comprar"],
+    "observacao_regra": ["Observação"],
     "ol_industria": ["OL / Indústria", "OL", "Indústria"],
     "ean": ["Código de Barras", "EAN", "Código barras"],
     "descricao_recebida": ["Produto", "Descrição", "Descrição produto"],
@@ -269,6 +271,8 @@ ALIASES_REGRAS = {
     "fornecedor": ["Fornecedor", "Distribuidor"],
     "codigo_fornecedor": ["Código fornecedor", "Cod fornecedor", "Código"],
     "tipo_operacao": ["Tipo operação", "Tipo de operação"],
+    "como_comprar": ["Como comprar"],
+    "observacao_regra": ["Observação"],
     "ativo": ["Ativo?", "Ativo"],
     "bloqueado": ["Bloqueado?", "Bloqueado"],
     "participa_cotacao": ["Participa da cotação por padrão?", "Participa cotação"],
@@ -276,7 +280,7 @@ ALIASES_REGRAS = {
     "minimo_faturamento": ["Mínimo de faturamento", "Minimo faturamento"],
     "prazo_pagamento": ["Prazo pagamento", "Condição pagamento"],
     "lead_time": ["Lead time", "Prazo entrega"],
-    "email": ["E-Mail", "Email"],
+    "email": ["E-Mail", "Email", "Email contato"],
 }
 
 ALIASES_HOMOLOGACAO = {

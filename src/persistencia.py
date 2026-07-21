@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from src.motor import ResultadoMotor
+from src.tempo import agora_brasil
 
 
 RUNTIME_DIR = Path(os.getenv("QC_RUNTIME_DIR", "/tmp/quali_cota"))
@@ -71,7 +72,7 @@ def salvar_resultado(resultado: ResultadoMotor) -> Path:
         "id_carga": resultado.id_carga,
         "resumo": _jsonavel(resumo_escalar),
         "diagnostico": _jsonavel(resultado.diagnostico),
-        "salvo_em": datetime.now().isoformat(),
+        "salvo_em": agora_brasil().isoformat(),
     }
     (pasta / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"

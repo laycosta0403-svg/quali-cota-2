@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Iterable
 
 import pandas as pd
@@ -14,6 +13,7 @@ from src.leitura import (
     numero,
     texto_codigo,
 )
+from src.tempo import agora_brasil, agora_brasil_sem_fuso
 
 
 @dataclass
@@ -26,6 +26,95 @@ class ResultadoMotor:
     ofertas_tratadas: pd.DataFrame
     resumo: dict[str, object]
     diagnostico: dict[str, object]
+
+
+# Nomes curtos usados na cotação versus razões sociais da base de regras.
+# O mapeamento evita rejeitar uma oferta apenas por diferença de nomenclatura.
+ALIASES_FORNECEDOR = {
+    "zerbini": "zerbini do brasil ltda",
+    "jm furtina": "j m furtina distribuidora de",
+    "samapi": "samapi distribuidora de produt",
+    "andorinha": "andorinha comercio e distribui",
+    "santa cruz": "distrib medic santa cruz ltda",
+    "milfarma": "milfarma comercial ltda",
+    "medicamental": "medicamental distribuidora ltd",
+    "panpharma": "panpharma distribuidora de med",
+    "cimed": "cimed remedios s a",
+    "maxifarma": "maxifarma distribuidora de med",
+    "j k medicamentos": "j k medicamentos ltda",
+    "profarma": "profarma distribuidora de prod",
+    "solfarma": "solfarma com prod farm sa",
+    "servimed": "servimed comercial ltda",
+    "marka": "marka distribuidora de medicam",
+    "roge": "roge interg comercio e distrib",
+    "navarro": "navarro distribuidora de medic",
+    "master formula": "master",
+    "julia": "julia cosmeticos ltda",
+    "mantiqueira": "mantiqueira distribuidora de p",
+    "gpz": "gpz comercial ltda",
+    "polydrogras": "polydrogas",
+    "polydrogras": "polydrogas",
+    "dismap": "ambrosio correa comercio dismap",
+}
+
+
+def _primeiro_preenchido(*valores: object) -> object:
+    for valor in valores:
+        if normalizar_texto(valor):
+            return valor
+    return ""
+
+
+def _tipo_operacao_regra(registro: dict) -> str:
+    valor = _primeiro_preenchido(
+        registro.get("tipo_operacao"),
+        registro.get("como_comprar"),
+        registro.get("observacao_regra"),
+    )
+    norm = normalizar_texto(valor)
+    if norm in {"ol", "online"} or norm.startswith("ol "):
+        return "OL"
+    if "direto" in norm or norm in {"dt", "direta"}:
+        return "Direto"
+    if "distr" in norm:
+        return "Distribuidor"
+    return str(valor or "")
+
+
+def _resolver_regra(regras_map: dict[str, dict], fornecedor: object) -> dict:
+    chave = normalizar_texto(fornecedor)
+    if not chave:
+        return {}
+    if chave in regras_map:
+        return regras_map[chave]
+
+    alvo = ALIASES_FORNECEDOR.get(chave)
+    if alvo:
+        if alvo in regras_map:
+            return regras_map[alvo]
+        candidatos = [regra for nome, regra in regras_map.items() if alvo in nome or nome in alvo]
+        if candidatos:
+            return candidatos[0]
+
+    # Fallback seguro: o nome curto deve aparecer como expressão completa na
+    # razão social. Evita aproximações por similaridade que poderiam misturar
+    # fornecedores diferentes.
+    candidatos = []
+    tokens_chave = chave.split()
+    for nome, regra in regras_map.items():
+        tokens_nome = nome.split()
+        frase_no_nome = all(token in tokens_nome for token in tokens_chave)
+        nome_na_frase = all(token in tokens_chave for token in tokens_nome)
+        if frase_no_nome or nome_na_frase:
+            if "exclusivo" in tokens_nome and "exclusivo" not in tokens_chave:
+                continue
+            if "perf" in tokens_nome and "perf" not in tokens_chave:
+                continue
+            candidatos.append((abs(len(nome) - len(chave)), nome, regra))
+    if candidatos:
+        candidatos.sort(key=lambda item: (item[0], item[1]))
+        return candidatos[0][2]
+    return {}
 
 
 def _col(df: pd.DataFrame, nome: str, padrao: object = "") -> pd.Series:
@@ -53,6 +142,9 @@ def _normalizar_regras(df: pd.DataFrame, desativados: Iterable[str]) -> pd.DataF
     regras["bloqueado_bool"] = _col(regras, "bloqueado", "Não").map(booleano_sim)
     regras["participa_cotacao_bool"] = _col(regras, "participa_cotacao", "Sim").map(booleano_sim)
     regras["participa_busca_bool"] = _col(regras, "participa_busca", "Sim").map(booleano_sim)
+    regras["tipo_operacao_resolvida"] = [
+        _tipo_operacao_regra(registro) for registro in regras.to_dict("records")
+    ]
     return regras
 
 
@@ -110,9 +202,12 @@ def _preparar_necessidade(df: pd.DataFrame, cadastro: pd.DataFrame) -> pd.DataFr
 
 
 def _regra_fornecedor(regras: pd.DataFrame, fornecedor: object) -> dict:
-    chave = normalizar_texto(fornecedor)
-    encontrados = regras[regras["fornecedor_norm"] == chave]
-    return encontrados.iloc[0].to_dict() if not encontrados.empty else {}
+    regras_map = {
+        str(registro.get("fornecedor_norm", "")): registro
+        for registro in regras.to_dict("records")
+        if str(registro.get("fornecedor_norm", ""))
+    }
+    return _resolver_regra(regras_map, fornecedor)
 
 
 def _homologado(homologacao: pd.DataFrame, ol: object, fornecedor: object) -> bool:
@@ -148,8 +243,8 @@ def _preparar_ofertas(
         eans = dividir_eans(original.get("ean")) or [""]
         fornecedor = original.get("fornecedor", "")
         fornecedor_norm = normalizar_texto(fornecedor)
-        regra = regras_map.get(fornecedor_norm, {})
-        tipo_operacao = original.get("tipo_operacao") or regra.get("tipo_operacao", "")
+        regra = _resolver_regra(regras_map, fornecedor)
+        tipo_operacao = original.get("tipo_operacao") or regra.get("tipo_operacao_resolvida", "")
         embalagem = max(1, int(numero(original.get("embalagem"), 1)))
         multiplo = max(1, int(numero(original.get("multiplo"), embalagem)))
         preco_final_base = numero(original.get("preco_final"), 0)
@@ -196,10 +291,13 @@ def _preparar_ofertas(
                     "ean_original": texto_codigo(original.get("ean")),
                     "ean": ean,
                     "sku": texto_codigo((cad or {}).get("sku")),
-                    "descricao_oficial": (cad or {}).get("descricao_oficial", original.get("descricao_recebida", "")),
-                    "fabricante": (cad or {}).get("fabricante", ""),
-                    "categoria": (cad or {}).get("categoria", ""),
+                    "descricao_oficial": _primeiro_preenchido(
+                        (cad or {}).get("descricao_oficial"), original.get("descricao_recebida", "")
+                    ),
+                    "fabricante": _primeiro_preenchido((cad or {}).get("fabricante"), ""),
+                    "categoria": _primeiro_preenchido((cad or {}).get("categoria"), ""),
                     "fornecedor": fornecedor,
+                    "fornecedor_regra": regra.get("fornecedor", ""),
                     "codigo_fornecedor": texto_codigo(original.get("codigo_fornecedor") or regra.get("codigo_fornecedor")),
                     "tipo_operacao": tipo_operacao,
                     "preco_fabrica": preco_fabrica,
@@ -220,6 +318,21 @@ def _preparar_ofertas(
                 }
             )
     return pd.DataFrame(linhas)
+
+
+def _enriquecer_ofertas_com_necessidade(ofertas: pd.DataFrame, necessidade: pd.DataFrame) -> pd.DataFrame:
+    if ofertas.empty or necessidade.empty:
+        return ofertas
+    meta = necessidade[["sku", "descricao_oficial", "fabricante", "categoria"]].copy()
+    meta = meta.drop_duplicates(subset=["sku"], keep="first").set_index("sku")
+    resultado = ofertas.copy()
+    for coluna in ["descricao_oficial", "fabricante", "categoria"]:
+        mapa = meta[coluna].to_dict()
+        atual = _col(resultado, coluna)
+        complemento = resultado["sku"].map(mapa)
+        vazio = atual.map(lambda valor: not normalizar_texto(valor))
+        resultado.loc[vazio, coluna] = complemento.loc[vazio]
+    return resultado
 
 
 def _ofertas_historico(
@@ -314,7 +427,9 @@ def _motivos_rejeicao_item(ofertas: pd.DataFrame, sku: str, ean: str) -> list[tu
     ]
 
 
-def _historico_atualizado(historico: pd.DataFrame, ofertas: pd.DataFrame, id_carga: str) -> pd.DataFrame:
+def _historico_atualizado(
+    historico: pd.DataFrame, ofertas: pd.DataFrame, id_carga: str, cadastro: pd.DataFrame
+) -> pd.DataFrame:
     anterior_interno = historico.copy() if historico is not None else pd.DataFrame()
     if anterior_interno.empty:
         anterior = pd.DataFrame()
@@ -350,11 +465,59 @@ def _historico_atualizado(historico: pd.DataFrame, ofertas: pd.DataFrame, id_car
                 "Observação sistema": _col(anterior_interno, "observacao_sistema"),
             }
         )
-    agora = datetime.now()
+    # Enriquece registros legados com tudo que pode ser recuperado pelo EAN.
+    # Datas e nomes de fornecedor que não existiam no arquivo original não são
+    # inventados; esses casos ficam identificados na observação.
+    if not anterior.empty:
+        por_ean, por_sku = _mapa_cadastro(cadastro)
+        enriquecidos = []
+        for registro in anterior.to_dict("records"):
+            ean = texto_codigo(registro.get("EAN tratado") or registro.get("EAN original"))
+            sku = texto_codigo(registro.get("SKU identificado"))
+            cad = por_sku.get(sku) if sku else por_ean.get(ean)
+            if cad:
+                registro["SKU identificado"] = sku or texto_codigo(cad.get("sku"))
+                registro["Descrição oficial"] = _primeiro_preenchido(
+                    registro.get("Descrição oficial"), cad.get("descricao_oficial")
+                )
+                registro["Fabricante"] = _primeiro_preenchido(
+                    registro.get("Fabricante"), cad.get("fabricante")
+                )
+                registro["Categoria"] = _primeiro_preenchido(
+                    registro.get("Categoria"), cad.get("categoria")
+                )
+                registro["Status EAN"] = _primeiro_preenchido(registro.get("Status EAN"), "OK")
+            preco_unitario = numero(registro.get("Preço unitário"), 0)
+            if preco_unitario <= 0:
+                divisor = max(
+                    1,
+                    int(numero(registro.get("Caixaria final"), 1)),
+                    int(numero(registro.get("Múltiplo"), 1)),
+                )
+                preco_final = numero(registro.get("Preço Final"), 0)
+                registro["Preço unitário"] = preco_final / divisor if preco_final > 0 else 0
+            observacao_valor = registro.get("Observação sistema")
+            observacao = str(observacao_valor).strip() if normalizar_texto(observacao_valor) and normalizar_texto(observacao_valor) != "nan" else ""
+            faltas_legado = []
+            if not normalizar_texto(registro.get("Data processamento")):
+                faltas_legado.append("data de processamento")
+            if not normalizar_texto(registro.get("Data da carga")):
+                faltas_legado.append("data da carga")
+            if not normalizar_texto(registro.get("Tipo operação")):
+                faltas_legado.append("tipo de operação")
+            if faltas_legado:
+                aviso = "Registro legado sem " + ", ".join(faltas_legado)
+                registro["Observação sistema"] = " | ".join(v for v in [observacao, aviso] if v)
+            enriquecidos.append(registro)
+        anterior = pd.DataFrame(enriquecidos, columns=anterior.columns)
+
+    agora = agora_brasil_sem_fuso()
     novos = pd.DataFrame(
         {
             "Data processamento": [agora] * len(ofertas),
-            "Data da carga": _col(ofertas, "data_carga"),
+            "Data da carga": _col(ofertas, "data_carga").map(
+                lambda valor: valor if normalizar_texto(valor) else agora.date()
+            ),
             "ID da carga": [id_carga] * len(ofertas),
             "Fornecedor": _col(ofertas, "fornecedor"),
             "Tipo operação": _col(ofertas, "tipo_operacao"),
@@ -380,6 +543,19 @@ def _historico_atualizado(historico: pd.DataFrame, ofertas: pd.DataFrame, id_car
             "Observação sistema": _col(ofertas, "motivos_rejeicao"),
         }
     )
+    # Campos que não existem na cotação atual são identificados claramente,
+    # em vez de serem exportados como células silenciosamente vazias.
+    novos["Tipo operação"] = novos["Tipo operação"].map(
+        lambda valor: valor if normalizar_texto(valor) else "Não informado"
+    )
+    novos["OL / Indústria"] = [
+        (ol if normalizar_texto(ol) else ("Não informado" if normalizar_texto(tipo) == "ol" else "Não se aplica"))
+        for ol, tipo in zip(novos["OL / Indústria"], novos["Tipo operação"])
+    ]
+    novos["Tipo preço"] = novos["Tipo preço"].map(
+        lambda valor: valor if normalizar_texto(valor) else "Unitário"
+    )
+
     combinado = pd.concat([anterior, novos], ignore_index=True, sort=False)
     chaves = [c for c in ["ID da carga", "Fornecedor", "EAN tratado", "SKU identificado", "Preço unitário"] if c in combinado.columns]
     if chaves:
@@ -401,7 +577,7 @@ def executar_motor(
     homologacao_ol = homologacao_ol if homologacao_ol is not None else pd.DataFrame()
     historico = historico if historico is not None else pd.DataFrame()
     diagnostico = diagnostico or {}
-    id_carga = id_carga or datetime.now().strftime("QDC_%Y%m%d_%H%M%S_%f")[:-3]
+    id_carga = id_carga or agora_brasil().strftime("QDC_%Y%m%d_%H%M%S_%f")[:-3]
 
     cadastro_n = _normalizar_cadastro(cadastro)
     regras_n = _normalizar_regras(regras_fornecedor, fornecedores_desativados)
@@ -410,6 +586,17 @@ def executar_motor(
     # permanecem no Planejamento, mas não devem virar pedido nem pendência.
     necessidade_n = necessidade_n[necessidade_n["quantidade_ajustada"] > 0].reset_index(drop=True)
     ofertas = _preparar_ofertas(cotacao, cadastro_n, regras_n, homologacao_ol)
+    ofertas = _enriquecer_ofertas_com_necessidade(ofertas, necessidade_n)
+
+    fornecedores_cotacao = sorted({str(v).strip() for v in _col(ofertas, "fornecedor") if str(v).strip()})
+    fornecedores_sem_regra = sorted({
+        str(v).strip()
+        for v in ofertas.loc[ofertas["motivos_rejeicao"].str.contains("Fornecedor sem regra", na=False), "fornecedor"]
+        if str(v).strip()
+    })
+    diagnostico["fornecedores_cotacao"] = len(fornecedores_cotacao)
+    diagnostico["fornecedores_mapeados"] = len(fornecedores_cotacao) - len(fornecedores_sem_regra)
+    diagnostico["fornecedores_sem_regra"] = fornecedores_sem_regra
 
     # Pendências são consolidadas apenas para os SKUs efetivamente solicitados;
     # não registramos uma pendência para cada uma das milhares de ofertas rejeitadas.
@@ -548,7 +735,7 @@ def executar_motor(
             {
                 "ID da carga": id_carga,
                 "Loja": 1015,
-                "Ciclo": datetime.now().strftime("%Y%m%d") + "/p1",
+                "Ciclo": agora_brasil().strftime("%Y%m%d") + "/p1",
                 "Tratativa": "",
                 "Fabricante ": item.get("fabricante", ""),
                 "Categoria ": item.get("categoria", ""),
@@ -621,7 +808,7 @@ def executar_motor(
     # centenas de milhares de linhas irrelevantes na memória do Streamlit.
     skus_processados = set(necessidade_n["sku"].map(texto_codigo))
     ofertas_relevantes = ofertas[ofertas["sku"].isin(skus_processados)].copy()
-    historico_atualizado = _historico_atualizado(historico, ofertas_relevantes, id_carga)
+    historico_atualizado = _historico_atualizado(historico, ofertas_relevantes, id_carga, cadastro_n)
 
     valor_total = numero(pedido.get("Valor total", pd.Series(dtype=float)).sum(), 0) if not pedido.empty else 0
     por_fornecedor = (
@@ -636,7 +823,7 @@ def executar_motor(
     )
     resumo = {
         "id_carga": id_carga,
-        "processado_em": datetime.now(),
+        "processado_em": agora_brasil(),
         "valor_total": valor_total,
         "skus_necessidade": len(necessidade_n),
         "skus_pedido": len(pedido),

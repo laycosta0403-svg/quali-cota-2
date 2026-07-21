@@ -119,9 +119,14 @@ if metadata is not None:
         f'**Aba lida:** {diagnostico.get("aba_necessidade", "—")}  ·  '
         f'**SKUs com Pedido Efetivo:** {int(diagnostico.get("skus_com_pedido", 0)):,}  ·  '
         f'**Unidades solicitadas:** {int(diagnostico.get("unidades_solicitadas", 0)):,}  ·  '
-        f'**Linhas da cotação:** {int(diagnostico.get("linhas_cotacao", 0)):,}'
+        f'**Linhas da cotação:** {int(diagnostico.get("linhas_cotacao", 0)):,}  ·  '
+        f'**Fornecedores mapeados:** {int(diagnostico.get("fornecedores_mapeados", 0))}/'
+        f'{int(diagnostico.get("fornecedores_cotacao", 0))}'
         .replace(",", ".")
     )
+    sem_regra = diagnostico.get("fornecedores_sem_regra", []) or []
+    if sem_regra:
+        st.warning("Fornecedores ainda sem correspondência na base de regras: " + ", ".join(sem_regra))
 
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("SKUs no pedido", int(resumo.get("skus_pedido", 0)))

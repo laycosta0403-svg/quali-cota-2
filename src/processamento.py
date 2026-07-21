@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Iterable
 
 import pandas as pd
@@ -17,10 +16,11 @@ from src.leitura import (
     texto_codigo,
 )
 from src.motor import ResultadoMotor, executar_motor
+from src.tempo import agora_brasil
 
 
 def gerar_id_carga() -> str:
-    return datetime.now().strftime("QDC_%Y%m%d_%H%M%S_%f")[:-3]
+    return agora_brasil().strftime("QDC_%Y%m%d_%H%M%S_%f")[:-3]
 
 
 def _nome_arquivo(arquivo) -> str:

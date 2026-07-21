@@ -58,6 +58,19 @@ class TestMotor(unittest.TestCase):
         self.assertTrue(resultado.id_carga.startswith("QDC_"))
         self.assertEqual(set(resultado.pedido["NR COTAÇÃO"]), {resultado.id_carga})
 
+
+    def test_alias_fornecedor_razao_social(self) -> None:
+        regras = pd.DataFrame(
+            [["SOLFARMA COM PROD FARM SA", "Distribuidor", "Sim", "Não", "Sim", "Sim", "60", 3]],
+            columns=["fornecedor", "tipo_operacao", "ativo", "bloqueado", "participa_cotacao", "participa_busca", "prazo_pagamento", "lead_time"],
+        )
+        cotacao = self.cotacao.iloc[[0]].copy()
+        cotacao.loc[:, "fornecedor"] = "SOLFARMA"
+        resultado = executar_motor(cotacao, self.necessidade.iloc[[0]], self.cadastro, regras)
+        self.assertEqual(len(resultado.pedido), 1)
+        self.assertEqual(resultado.pedido.iloc[0]["Fornecedor recomendado"], "SOLFARMA")
+        self.assertEqual(resultado.diagnostico.get("fornecedores_sem_regra"), [])
+
     def test_template_mantem_estrutura(self) -> None:
         resultado = executar_motor(self.cotacao, self.necessidade, self.cadastro, self.regras)
         template = Path(__file__).resolve().parents[1] / "templates" / "Modelo Envio Pedidos Fornecedor_Medicamentos.xlsx"
