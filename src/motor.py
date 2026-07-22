@@ -226,6 +226,7 @@ def _preparar_ofertas(
     cadastro: pd.DataFrame,
     regras: pd.DataFrame,
     homologacao: pd.DataFrame,
+    eans_interesse: set[str] | None = None,
 ) -> pd.DataFrame:
     por_ean, _ = _mapa_cadastro(cadastro)
     regras_map = {
@@ -238,12 +239,26 @@ def _preparar_ofertas(
         for registro in homologacao.to_dict("records")
     } if not homologacao.empty else {}
 
+    # Resolver a regra uma única vez por fornecedor. A cotação real tem cerca de
+    # 129 mil linhas, mas somente poucas dezenas de fornecedores distintos.
+    fornecedores_originais = {
+        normalizar_texto(valor): valor
+        for valor in _col(cotacao, "fornecedor")
+        if normalizar_texto(valor)
+    }
+    regras_resolvidas = {
+        chave: _resolver_regra(regras_map, valor)
+        for chave, valor in fornecedores_originais.items()
+    }
+
     linhas: list[dict] = []
     for original in cotacao.to_dict("records"):
         eans = dividir_eans(original.get("ean")) or [""]
+        if eans_interesse is not None and not any(ean in eans_interesse for ean in eans):
+            continue
         fornecedor = original.get("fornecedor", "")
         fornecedor_norm = normalizar_texto(fornecedor)
-        regra = _resolver_regra(regras_map, fornecedor)
+        regra = regras_resolvidas.get(fornecedor_norm, {})
         tipo_operacao = original.get("tipo_operacao") or regra.get("tipo_operacao_resolvida", "")
         embalagem = max(1, int(numero(original.get("embalagem"), 1)))
         multiplo = max(1, int(numero(original.get("multiplo"), embalagem)))
@@ -325,7 +340,9 @@ def _enriquecer_ofertas_com_necessidade(ofertas: pd.DataFrame, necessidade: pd.D
         return ofertas
     meta = necessidade[["sku", "descricao_oficial", "fabricante", "categoria"]].copy()
     meta = meta.drop_duplicates(subset=["sku"], keep="first").set_index("sku")
-    resultado = ofertas.copy()
+    # Trabalha no próprio DataFrame para não duplicar centenas de milhares de
+    # células em memória no Streamlit.
+    resultado = ofertas
     for coluna in ["descricao_oficial", "fabricante", "categoria"]:
         mapa = meta[coluna].to_dict()
         atual = _col(resultado, coluna)
@@ -585,15 +602,42 @@ def executar_motor(
     # Somente itens com Pedido Efetivo positivo entram no motor. Linhas zeradas
     # permanecem no Planejamento, mas não devem virar pedido nem pendência.
     necessidade_n = necessidade_n[necessidade_n["quantidade_ajustada"] > 0].reset_index(drop=True)
-    ofertas = _preparar_ofertas(cotacao, cadastro_n, regras_n, homologacao_ol)
+
+    # A cotação real possui ~129 mil linhas, mas a rodada pede menos de 2 mil
+    # SKUs. Filtramos antes de materializar o DataFrame enriquecido de ofertas,
+    # reduzindo fortemente memória e tempo sem alterar a decisão do motor.
+    skus_interesse = set(necessidade_n["sku"].map(texto_codigo))
+    eans_interesse = {
+        texto_codigo(valor)
+        for valor in necessidade_n["ean"]
+        if texto_codigo(valor)
+    }
+    cadastro_interesse = cadastro_n[cadastro_n["sku"].isin(skus_interesse)]
+    for coluna_ean in ["ean_compra", "ean_venda"]:
+        eans_interesse.update(
+            texto_codigo(valor)
+            for valor in _col(cadastro_interesse, coluna_ean)
+            if texto_codigo(valor)
+        )
+
+    regras_map = {
+        str(registro.get("fornecedor_norm", "")): registro
+        for registro in regras_n.to_dict("records")
+        if str(registro.get("fornecedor_norm", ""))
+    }
+    fornecedores_cotacao = sorted({str(v).strip() for v in _col(cotacao, "fornecedor") if str(v).strip()})
+    fornecedores_sem_regra = sorted([
+        fornecedor
+        for fornecedor in fornecedores_cotacao
+        if not _resolver_regra(regras_map, fornecedor)
+    ])
+
+    ofertas = _preparar_ofertas(
+        cotacao, cadastro_n, regras_n, homologacao_ol, eans_interesse=eans_interesse
+    )
+    diagnostico["linhas_cotacao_relevantes"] = len(ofertas)
     ofertas = _enriquecer_ofertas_com_necessidade(ofertas, necessidade_n)
 
-    fornecedores_cotacao = sorted({str(v).strip() for v in _col(ofertas, "fornecedor") if str(v).strip()})
-    fornecedores_sem_regra = sorted({
-        str(v).strip()
-        for v in ofertas.loc[ofertas["motivos_rejeicao"].str.contains("Fornecedor sem regra", na=False), "fornecedor"]
-        if str(v).strip()
-    })
     diagnostico["fornecedores_cotacao"] = len(fornecedores_cotacao)
     diagnostico["fornecedores_mapeados"] = len(fornecedores_cotacao) - len(fornecedores_sem_regra)
     diagnostico["fornecedores_sem_regra"] = fornecedores_sem_regra

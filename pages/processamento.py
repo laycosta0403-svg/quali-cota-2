@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import json
+import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -19,29 +21,123 @@ from src.persistencia import (
     salvar_resultado,
 )
 from src.processamento import processar_arquivos
+from src.sharepoint import SharePointConfig, SharePointConnector, SharePointError, SharePointFile
 
 
 st.title("⚙️ Processamento de Dados")
 st.caption("Execute o motor e gere os quatro outputs oficiais da rodada.")
 
-st.info(
-    "A integração automática com o SharePoint continua pausada aguardando o TI. "
-    "Nesta etapa, os arquivos são enviados manualmente para validar o motor."
+
+def _sharepoint_config() -> SharePointConfig | None:
+    try:
+        secao = st.secrets.get("sharepoint")
+    except (FileNotFoundError, KeyError):
+        return None
+    if not secao:
+        return None
+    try:
+        return SharePointConfig.from_mapping(dict(secao))
+    except SharePointError as exc:
+        st.warning(f"Secrets do SharePoint incompletos: {exc}")
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def _connector(config_json: str) -> SharePointConnector:
+    return SharePointConnector(SharePointConfig.from_mapping(json.loads(config_json)))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _listar_sharepoint(config_json: str, folder: str) -> list[dict]:
+    conector = _connector(config_json)
+    return [item.__dict__ for item in conector.list_files(folder)]
+
+
+config_sp = _sharepoint_config()
+modo_padrao = "SharePoint" if config_sp else "Upload manual"
+modo = st.radio(
+    "Origem dos arquivos da rodada",
+    ["SharePoint", "Upload manual"],
+    index=0 if modo_padrao == "SharePoint" else 1,
+    horizontal=True,
+    help="O upload manual permanece como contingência.",
 )
 
-st.markdown("### 1. Arquivos da rodada")
-cotacoes = st.file_uploader(
-    "Cotação(ões)",
-    type=["xlsx", "xlsb", "csv"],
-    accept_multiple_files=True,
-    help="É possível enviar uma ou várias cotações na mesma rodada.",
-)
-necessidade = st.file_uploader(
-    "Necessidade de compra",
-    type=["xlsx", "xlsb", "csv"],
-    accept_multiple_files=False,
-    help='O sistema usa obrigatoriamente a aba cujo nome contém "Volume de Compras".',
-)
+cotacoes = []
+necessidade = None
+sp_cotacoes_selecionadas: list[SharePointFile] = []
+sp_necessidade_selecionada: SharePointFile | None = None
+
+if modo == "SharePoint":
+    if config_sp is None:
+        st.error(
+            "O conector está instalado, mas os Secrets do SharePoint ainda não foram cadastrados. "
+            "Abra Manage app → Settings → Secrets e cole a configuração fornecida no pacote."
+        )
+    else:
+        config_json = json.dumps(config_sp.__dict__, sort_keys=True)
+        conector = _connector(config_json)
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            if st.button("🔄 Atualizar listas", width="stretch"):
+                _listar_sharepoint.clear()
+                st.rerun()
+        with c2:
+            try:
+                diag = conector.diagnostic()
+                st.success(
+                    f'Conectado ao SharePoint · biblioteca: {diag["library_name"]}',
+                    icon="✅",
+                )
+            except SharePointError as exc:
+                st.error(f"Falha no teste do SharePoint: {exc}")
+
+        try:
+            with st.spinner("Consultando arquivos liberados no SharePoint..."):
+                dados_cotacoes = _listar_sharepoint(config_json, config_sp.cotacoes_folder)
+                dados_necessidades = _listar_sharepoint(config_json, config_sp.planejamento_folder)
+            arquivos_cotacao = [SharePointFile(**item) for item in dados_cotacoes]
+            arquivos_necessidade = [SharePointFile(**item) for item in dados_necessidades]
+            mapa_cotacoes = {item.item_id: item for item in arquivos_cotacao}
+            mapa_necessidades = {item.item_id: item for item in arquivos_necessidade}
+
+            st.markdown("### 1. Arquivos da rodada")
+            ids_cotacoes = st.multiselect(
+                "Cotação(ões) encontradas no SharePoint",
+                options=list(mapa_cotacoes),
+                format_func=lambda item_id: mapa_cotacoes[item_id].label,
+                placeholder="Selecione uma ou mais cotações",
+            )
+            necessidade_id = st.selectbox(
+                "Necessidade de compra encontrada no SharePoint",
+                options=[""] + list(mapa_necessidades),
+                format_func=lambda item_id: (
+                    "Selecione o Planejamento" if not item_id else mapa_necessidades[item_id].label
+                ),
+            )
+            sp_cotacoes_selecionadas = [mapa_cotacoes[item_id] for item_id in ids_cotacoes]
+            sp_necessidade_selecionada = mapa_necessidades.get(necessidade_id)
+            if not arquivos_cotacao:
+                st.warning(f'Nenhuma cotação foi encontrada em "{config_sp.cotacoes_folder}".')
+            if not arquivos_necessidade:
+                st.warning(f'Nenhum Planejamento foi encontrado em "{config_sp.planejamento_folder}".')
+        except SharePointError as exc:
+            st.error(f"Não foi possível listar os arquivos do SharePoint: {exc}")
+else:
+    st.info("Modo de contingência: os arquivos serão enviados manualmente.")
+    st.markdown("### 1. Arquivos da rodada")
+    cotacoes = st.file_uploader(
+        "Cotação(ões)",
+        type=["xlsx", "xlsb", "csv"],
+        accept_multiple_files=True,
+        help="É possível enviar uma ou várias cotações na mesma rodada.",
+    )
+    necessidade = st.file_uploader(
+        "Necessidade de compra",
+        type=["xlsx", "xlsb", "csv"],
+        accept_multiple_files=False,
+        help='O sistema usa obrigatoriamente a aba cujo nome contém "Volume de Compras".',
+    )
 
 with st.expander("Bases técnicas do motor", expanded=False):
     st.caption("Essas bases alimentam o motor, mas não viram etapas extras para o usuário.")
@@ -59,12 +155,22 @@ with st.expander("Bases técnicas do motor", expanded=False):
         height=90,
     )
 
-pronto = bool(cotacoes) and necessidade is not None and cadastro is not None and regras is not None
+arquivos_rodada_prontos = (
+    bool(sp_cotacoes_selecionadas) and sp_necessidade_selecionada is not None
+    if modo == "SharePoint"
+    else bool(cotacoes) and necessidade is not None
+)
+pronto = arquivos_rodada_prontos and cadastro is not None and regras is not None
 
 st.markdown("### 2. Processar")
+st.caption(
+    "Com os arquivos reais, a leitura e a classificação podem levar alguns minutos. "
+    "Não clique novamente enquanto o motor estiver executando."
+)
 if st.button("⚙️ Processar motor", type="primary", width="stretch", disabled=not pronto):
     desativados = [linha.strip() for linha in desativados_texto.splitlines() if linha.strip()]
     etapas = [
+        "Obtendo os arquivos da rodada",
         "Lendo a aba Volume de Compras",
         "Validando Pedido Efetivo, EANs e fornecedores",
         "Classificando as quatro melhores opções",
@@ -73,19 +179,35 @@ if st.button("⚙️ Processar motor", type="primary", width="stretch", disabled
     barra = st.progress(0)
     status = st.empty()
     try:
-        for indice, etapa in enumerate(etapas[:-1], start=1):
-            status.write(f"**{etapa}...**")
-            barra.progress(indice / len(etapas))
+        with tempfile.TemporaryDirectory(prefix="quali_cota_sp_") as pasta_temporaria:
+            if modo == "SharePoint":
+                status.write(f"**{etapas[0]} no SharePoint...**")
+                pasta = Path(pasta_temporaria)
+                cotacoes_processar = [
+                    conector.download_file(item, pasta / "cotacoes")
+                    for item in sp_cotacoes_selecionadas
+                ]
+                necessidade_processar = conector.download_file(
+                    sp_necessidade_selecionada, pasta / "planejamento"
+                )
+            else:
+                cotacoes_processar = cotacoes
+                necessidade_processar = necessidade
+            barra.progress(1 / len(etapas))
 
-        resultado = processar_arquivos(
-            cotacoes=cotacoes,
-            necessidade=necessidade,
-            cadastro=cadastro,
-            regras=regras,
-            homologacao=homologacao,
-            historico=historico_anterior,
-            fornecedores_desativados=desativados,
-        )
+            for indice, etapa in enumerate(etapas[1:-1], start=2):
+                status.write(f"**{etapa}...**")
+                barra.progress(indice / len(etapas))
+
+            resultado = processar_arquivos(
+                cotacoes=cotacoes_processar,
+                necessidade=necessidade_processar,
+                cadastro=cadastro,
+                regras=regras,
+                homologacao=homologacao,
+                historico=historico_anterior,
+                fornecedores_desativados=desativados,
+            )
         status.write(f"**{etapas[-1]}...**")
         salvar_resultado(resultado)
         st.session_state["qc_id_carga"] = resultado.id_carga
@@ -103,7 +225,10 @@ if st.button("⚙️ Processar motor", type="primary", width="stretch", disabled
         st.exception(exc)
 
 if not pronto:
-    st.caption("Envie cotação, necessidade, cadastro EAN/SKU e regras de fornecedor para habilitar o motor.")
+    st.caption(
+        "Selecione cotação e necessidade e envie cadastro EAN/SKU e regras de fornecedor "
+        "para habilitar o motor."
+    )
 
 id_carga = st.session_state.get("qc_id_carga") or obter_ultimo_id()
 metadata = carregar_metadata(id_carga)
@@ -120,6 +245,7 @@ if metadata is not None:
         f'**SKUs com Pedido Efetivo:** {int(diagnostico.get("skus_com_pedido", 0)):,}  ·  '
         f'**Unidades solicitadas:** {int(diagnostico.get("unidades_solicitadas", 0)):,}  ·  '
         f'**Linhas da cotação:** {int(diagnostico.get("linhas_cotacao", 0)):,}  ·  '
+        f'**Ofertas relevantes processadas:** {int(diagnostico.get("linhas_cotacao_relevantes", 0)):,}  ·  '
         f'**Fornecedores mapeados:** {int(diagnostico.get("fornecedores_mapeados", 0))}/'
         f'{int(diagnostico.get("fornecedores_cotacao", 0))}'
         .replace(",", ".")

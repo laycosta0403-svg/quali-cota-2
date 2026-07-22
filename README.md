@@ -15,9 +15,9 @@ O motor recebe cotação, necessidade e bases técnicas, valida as ofertas e ent
 
 A classificação considera EAN/SKU, fornecedor ativo, bloqueio, participação na cotação, homologação OL, preço válido, estoque, caixaria/múltiplo e busca ampliada para ruptura crônica.
 
-## Fase 2 pausada
+## Fase 2 — SharePoint
 
-A leitura automática de cotação e necessidade no SharePoint permanece isolada aguardando aprovação do TI. Enquanto isso, a página **Processamento de Dados** permite upload manual de arquivos para validar o motor.
+O conector Microsoft Graph lista as cotações e os Planejamentos nas pastas configuradas em `st.secrets`. O upload manual permanece disponível como contingência. Consulte `PATCH_SHAREPOINT_CONNECTOR.md`.
 
 ## Estrutura
 
@@ -33,6 +33,7 @@ src/
   processamento.py
   exportacao.py
   ui.py
+  sharepoint.py
 templates/
   Modelo Envio Pedidos Fornecedor_Medicamentos.xlsx
 ```
