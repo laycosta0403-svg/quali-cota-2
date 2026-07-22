@@ -76,6 +76,9 @@ if modo == "SharePoint automático":
         with a:
             if st.button("🔄 Atualizar", width="stretch"):
                 _inventario_sharepoint.clear()
+                for chave in list(st.session_state):
+                    if chave.startswith("qc_map_"):
+                        del st.session_state[chave]
                 st.rerun()
         with b:
             try:
@@ -84,31 +87,68 @@ if modo == "SharePoint automático":
             except SharePointError as exc:
                 st.error(f"Falha na conexão: {exc}")
         try:
-            with st.spinner("Mapeando QualiCota, Supply e subpastas..."):
+            with st.spinner("Mapeando pastas autorizadas..."):
                 inventario = [SharePointFile(**row) for row in _inventario_sharepoint(config_json)]
+                candidatos = SharePointConnector.candidates_by_role(inventario)
                 sp_auto = SharePointConnector.discover(inventario)
-            st.info(f"{len(inventario):,} arquivos compatíveis encontrados nas pastas autorizadas.".replace(",", "."))
-            st.markdown("### Arquivos identificados automaticamente")
-            linhas = {
-                "Cotação(ões)": ", ".join(x.name for x in sp_auto.cotacoes) or "Não encontrada",
-                "Necessidade": sp_auto.necessidade.name if sp_auto.necessidade else "Não encontrada",
-                "Cadastro EAN/SKU": sp_auto.cadastro.name if sp_auto.cadastro else "Não encontrado",
-                "Regras de fornecedor": sp_auto.regras.name if sp_auto.regras else "Não encontradas",
-                "Homologação OL": sp_auto.homologacao.name if sp_auto.homologacao else "Opcional — não encontrada",
-                "Histórico": sp_auto.historico.name if sp_auto.historico else "Opcional — não encontrado",
-            }
-            st.dataframe(
-                [{"Tipo": k, "Arquivo": v} for k, v in linhas.items()],
-                hide_index=True,
-                width="stretch",
+            st.info(f"{len(inventario):,} arquivos compatíveis encontrados.".replace(",", "."))
+            st.markdown("### Mapeamento assistido dos arquivos")
+            st.caption("O sistema sugere; você corrige somente o que estiver errado. Nome e caminho completo aparecem nos seletores.")
+
+            def _label(item: SharePointFile) -> str:
+                return f"{item.name}  —  {item.path}"
+
+            def _select_one(titulo: str, opcoes: list[SharePointFile], key: str, obrigatorio: bool, sugestao: SharePointFile | None):
+                lista = ([None] if not obrigatorio else []) + opcoes
+                indice = 0
+                if sugestao in lista:
+                    indice = lista.index(sugestao)
+                escolhido = st.selectbox(
+                    titulo + (" *" if obrigatorio else " — opcional"),
+                    lista,
+                    index=indice,
+                    format_func=lambda x: "Não usar nesta rodada" if x is None else _label(x),
+                    key=key,
+                )
+                return escolhido
+
+            cotacoes = st.multiselect(
+                "Cotação(ões) *",
+                candidatos["cotacoes"],
+                default=list(sp_auto.cotacoes),
+                format_func=_label,
+                key="qc_map_cotacoes",
+                help="Arquivos de QualiCota/01 - Entrada de Arquivos. É possível selecionar mais de um.",
             )
-            faltantes = []
-            if not sp_auto.cotacoes: faltantes.append("cotação")
-            if not sp_auto.necessidade: faltantes.append("necessidade")
-            if not sp_auto.cadastro: faltantes.append("cadastro EAN/SKU")
-            if not sp_auto.regras: faltantes.append("regras de fornecedor")
-            if faltantes:
-                st.error("Não foi possível localizar automaticamente: " + ", ".join(faltantes) + ". Use a contingência manual ou ajuste os nomes/pastas.")
+            necessidade = _select_one(
+                "Planejamento da rodada", candidatos["planejamentos"], "qc_map_planejamento", True,
+                sp_auto.necessidade,
+            )
+            if necessidade:
+                st.success(
+                    "Necessidade: aba `Volume de Compras - Dia` · Cadastro EAN/SKU: aba `Ean` do mesmo Planejamento.",
+                    icon="✅",
+                )
+            cadastro = necessidade
+            regras = _select_one(
+                "Regras de fornecedor", candidatos["regras"], "qc_map_regras", False, sp_auto.regras
+            )
+            homologacao = _select_one(
+                "Homologação OL", candidatos["homologacoes"], "qc_map_homologacao", False, sp_auto.homologacao
+            )
+            historico_anterior = _select_one(
+                "Histórico", candidatos["historicos"], "qc_map_historico", False, sp_auto.historico
+            )
+
+            st.markdown("#### Conferência da rodada")
+            st.dataframe([
+                {"Papel": "Cotação(ões)", "Seleção": " | ".join(_label(x) for x in cotacoes) or "Não selecionada", "Obrigatório": "Sim"},
+                {"Papel": "Necessidade", "Seleção": _label(necessidade) if necessidade else "Não selecionada", "Obrigatório": "Sim"},
+                {"Papel": "Cadastro EAN/SKU", "Seleção": (f"Aba Ean de {_label(necessidade)}" if necessidade else "Não disponível"), "Obrigatório": "Enriquecimento automático"},
+                {"Papel": "Regras", "Seleção": _label(regras) if regras else "Não usar", "Obrigatório": "Não"},
+                {"Papel": "Homologação OL", "Seleção": _label(homologacao) if homologacao else "Não usar", "Obrigatório": "Não"},
+                {"Papel": "Histórico", "Seleção": _label(historico_anterior) if historico_anterior else "Não usar", "Obrigatório": "Não"},
+            ], hide_index=True, width="stretch")
         except SharePointError as exc:
             st.error(f"Não foi possível mapear o SharePoint: {exc}")
 else:
@@ -127,8 +167,8 @@ desativados_texto = st.text_area(
     height=80,
 )
 
-pronto_sp = bool(sp_auto and sp_auto.cotacoes and sp_auto.necessidade and sp_auto.cadastro and sp_auto.regras)
-pronto_manual = bool(cotacoes) and necessidade is not None and cadastro is not None and regras is not None
+pronto_sp = bool(cotacoes and necessidade)
+pronto_manual = bool(cotacoes) and necessidade is not None
 pronto = pronto_sp if modo == "SharePoint automático" else pronto_manual
 
 st.markdown("### Processar")
@@ -146,15 +186,16 @@ if st.button("⚙️ Processar motor", type="primary", width="stretch", disabled
     try:
         with tempfile.TemporaryDirectory(prefix="quali_cota_sp_") as pasta_temporaria:
             if modo == "SharePoint automático":
-                assert conector is not None and sp_auto is not None
+                assert conector is not None
                 pasta = Path(pasta_temporaria)
                 status.write(f"**{etapas[0]}...**")
-                cotacoes_processar = [conector.download_file(item, pasta / "cotacoes") for item in sp_auto.cotacoes]
-                necessidade_processar = conector.download_file(sp_auto.necessidade, pasta / "necessidade")
-                cadastro_processar = conector.download_file(sp_auto.cadastro, pasta / "bases")
-                regras_processar = conector.download_file(sp_auto.regras, pasta / "bases")
-                homologacao_processar = conector.download_file(sp_auto.homologacao, pasta / "bases") if sp_auto.homologacao else None
-                historico_processar = conector.download_file(sp_auto.historico, pasta / "bases") if sp_auto.historico else None
+                cotacoes_processar = [conector.download_file(item, pasta / "cotacoes") for item in cotacoes]
+                necessidade_processar = conector.download_file(necessidade, pasta / "necessidade")
+                # Cadastro usa o mesmo arquivo físico, lido na aba Ean.
+                cadastro_processar = necessidade_processar
+                regras_processar = conector.download_file(regras, pasta / "bases") if regras else None
+                homologacao_processar = conector.download_file(homologacao, pasta / "bases") if homologacao else None
+                historico_processar = conector.download_file(historico_anterior, pasta / "bases") if historico_anterior else None
             else:
                 cotacoes_processar = cotacoes
                 necessidade_processar = necessidade
@@ -191,7 +232,7 @@ if st.button("⚙️ Processar motor", type="primary", width="stretch", disabled
         st.exception(exc)
 
 if not pronto:
-    st.caption("O botão será liberado quando cotação, necessidade, cadastro e regras forem encontrados.")
+    st.caption("O botão será liberado quando pelo menos uma cotação e um Planejamento forem selecionados.")
 
 id_carga = st.session_state.get("qc_id_carga") or obter_ultimo_id()
 metadata = carregar_metadata(id_carga)
@@ -213,6 +254,10 @@ if metadata is not None:
         f'{int(diagnostico.get("fornecedores_cotacao", 0))}'
         .replace(",", ".")
     )
+    avisos_bases = diagnostico.get("avisos_bases", []) or []
+    for aviso in avisos_bases:
+        st.warning(aviso)
+
     sem_regra = diagnostico.get("fornecedores_sem_regra", []) or []
     if sem_regra:
         st.warning("Fornecedores ainda sem correspondência na base de regras: " + ", ".join(sem_regra))

@@ -83,28 +83,73 @@ def processar_arquivos(
             "não trouxe nenhuma quantidade maior que zero. O processamento foi bloqueado."
         )
 
-    cadastro_df = ler_tabela(
-        cadastro,
-        ALIASES_CADASTRO,
-        abas_preferidas=["cadastro", "ean"],
-        exigir_colunas=["sku"],
-    )
-    regras_df = ler_tabela(
-        regras,
-        ALIASES_REGRAS,
-        abas_preferidas=["regras", "fornecedor"],
-        exigir_colunas=["fornecedor"],
-    )
-    homologacao_df = (
-        ler_tabela(homologacao, ALIASES_HOMOLOGACAO, abas_preferidas=["homologacao", "ol"])
-        if homologacao is not None
-        else pd.DataFrame()
-    )
-    historico_df = (
-        ler_tabela(historico, ALIASES_HISTORICO, abas_preferidas=["historico"])
-        if historico is not None
-        else pd.DataFrame()
-    )
+    avisos_bases: list[str] = []
+
+    # Por desenho, o cadastro vem da aba Ean do mesmo Planejamento. Caso a aba
+    # não esteja utilizável, criamos um cadastro mínimo a partir da necessidade,
+    # permitindo a rodada sem esconder que faltou enriquecimento.
+    try:
+        cadastro_df = ler_tabela(
+            cadastro if cadastro is not None else necessidade,
+            ALIASES_CADASTRO,
+            aba_obrigatoria="ean",
+            exigir_colunas=["sku"],
+        )
+    except Exception as exc:
+        avisos_bases.append(f"Cadastro EAN/SKU não validado: {exc}")
+        cadastro_df = pd.DataFrame({
+            "ean_compra": necessidade_df["ean"],
+            "ean_venda": necessidade_df["ean"],
+            "sku": necessidade_df["sku"],
+            "descricao_oficial": necessidade_df.get("descricao", ""),
+            "fabricante": necessidade_df.get("fabricante", ""),
+            "categoria": necessidade_df.get("categoria", ""),
+            "caixaria_padrao": necessidade_df.get("caixaria", 1),
+            "multiplo_padrao": necessidade_df.get("caixaria", 1),
+            "status_ean": "Ativo",
+        })
+
+    try:
+        regras_df = ler_tabela(
+            regras,
+            ALIASES_REGRAS,
+            abas_preferidas=["regras", "fornecedor"],
+            exigir_colunas=["fornecedor"],
+        ) if regras is not None else pd.DataFrame()
+    except Exception as exc:
+        avisos_bases.append(f"Regras de fornecedor não validadas: {exc}")
+        regras_df = pd.DataFrame()
+
+    # Sem regras selecionadas, aplicamos uma base permissiva mínima para não
+    # bloquear a rodada. O Dashboard registra que esse enriquecimento faltou.
+    if regras_df.empty:
+        fornecedores = sorted({str(v).strip() for v in cotacao_df.get("fornecedor", []) if str(v).strip()})
+        regras_df = pd.DataFrame({
+            "fornecedor": fornecedores,
+            "ativo": "Sim",
+            "bloqueado": "Não",
+            "participa_cotacao": "Sim",
+            "participa_busca": "Sim",
+        })
+        avisos_bases.append("Rodada processada com regras permissivas geradas a partir da cotação.")
+
+    try:
+        homologacao_df = (
+            ler_tabela(homologacao, ALIASES_HOMOLOGACAO, abas_preferidas=["homologacao", "ol"])
+            if homologacao is not None else pd.DataFrame()
+        )
+    except Exception as exc:
+        avisos_bases.append(f"Homologação OL não validada: {exc}")
+        homologacao_df = pd.DataFrame()
+
+    try:
+        historico_df = (
+            ler_tabela(historico, ALIASES_HISTORICO, abas_preferidas=["historico"])
+            if historico is not None else pd.DataFrame()
+        )
+    except Exception as exc:
+        avisos_bases.append(f"Histórico não validado: {exc}")
+        historico_df = pd.DataFrame()
 
     diagnostico = {
         "id_carga": id_carga,
@@ -116,6 +161,11 @@ def processar_arquivos(
         "unidades_solicitadas": unidades_solicitadas,
         "linhas_cotacao": len(cotacao_df),
         "abas_cotacao": abas_cotacao,
+        "avisos_bases": avisos_bases,
+        "arquivo_cadastro": _nome_arquivo(cadastro if cadastro is not None else necessidade),
+        "arquivo_regras": _nome_arquivo(regras) if regras is not None else "Não selecionado",
+        "arquivo_homologacao": _nome_arquivo(homologacao) if homologacao is not None else "Não selecionado",
+        "arquivo_historico": _nome_arquivo(historico) if historico is not None else "Não selecionado",
     }
 
     return executar_motor(

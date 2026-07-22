@@ -231,36 +231,80 @@ class SharePointConnector:
         return sorted(unique.values(), key=lambda item: item.modified_at, reverse=True)
 
     @staticmethod
-    def discover(files: Iterable[SharePointFile]) -> AutoDiscovery:
+    def _path_contains(item: SharePointFile, *parts: str) -> bool:
+        path = _norm(item.path)
+        return all(_norm(part) in path for part in parts if part)
+
+    @staticmethod
+    def candidates_by_role(files: Iterable[SharePointFile]) -> dict[str, list[SharePointFile]]:
+        """Retorna listas enxutas para o mapeador assistido.
+
+        A seleção usa primeiro o caminho operacional informado pela usuária e
+        só depois o nome/data. Isso evita oferecer 10 mil arquivos em cada
+        seletor e mantém a possibilidade de correção manual.
+        """
         items = list(files)
-        def score(item: SharePointFile, terms: tuple[str, ...], path_terms: tuple[str, ...] = ()) -> int:
-            name = _norm(item.name)
-            path = _norm(item.path)
-            total = sum(25 for term in terms if _norm(term) in name)
-            total += sum(8 for term in path_terms if _norm(term) in path)
-            if item.extension == ".xlsb": total += 2
-            return total
-        def best(terms: tuple[str, ...], path_terms: tuple[str, ...] = ()) -> SharePointFile | None:
-            ranked = [(score(x, terms, path_terms), x.modified_at, x) for x in items]
-            ranked = [row for row in ranked if row[0] > 0]
-            return max(ranked, default=(0, "", None), key=lambda row: (row[0], row[1]))[2]
+        by_modified = lambda seq: sorted(seq, key=lambda x: x.modified_at, reverse=True)
 
-        necessidade = best(("planejamento", "volume de compras"), ("supply", "compras", "novo"))
-        cadastro = best(("cadastro ean", "ean sku", "cadastro mestre"), ("governanca", "bases estruturais"))
-        regras = best(("regras fornecedor", "saneamento regras fornecedor"), ("governanca", "bases estruturais"))
-        homologacao = best(("homologacao ol", "homologacao"), ("governanca",))
-        historico = best(("historico cotacao", "historico"), ("auditoria", "historico", "governanca"))
+        cotacoes = [
+            x for x in items
+            if SharePointConnector._path_contains(x, 'QualiCota', '01 Entrada de Arquivos')
+        ]
+        # Planejamento muda diariamente. Priorizamos arquivos na árvore Supply
+        # cujo nome contenha Planejamento; o mais recente será sugerido.
+        planejamentos = [
+            x for x in items
+            if SharePointConnector._path_contains(x, 'Supply') and 'planejamento' in _norm(x.name)
+        ]
+        regras = [
+            x for x in items
+            if SharePointConnector._path_contains(x, 'QualiCota', '04 Governanca')
+            and ('regras fornecedor' in _norm(x.name) or 'regras fornecedores' in _norm(x.name))
+        ]
+        homologacoes = [
+            x for x in items
+            if SharePointConnector._path_contains(x, 'Bases Estruturais')
+            and 'mapa de envio de pedidos' in _norm(x.name)
+        ]
+        historicos = [
+            x for x in items
+            if SharePointConnector._path_contains(x, 'Supply', 'COMPRAS 1', 'NOVO')
+            and 'mapa diario 2 0' in _norm(x.name)
+        ]
 
-        cot_candidates = []
-        for item in items:
-            if necessidade and item.item_id == necessidade.item_id:
-                continue
-            s = score(item, ("cotacao", "subir robozinho", "robozinho", "mapa cotacao"), ("entrada de arquivos", "qualicota"))
-            if s > 0:
-                cot_candidates.append((s, item.modified_at, item))
-        cot_candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        cotacoes = tuple(row[2] for row in cot_candidates[:5])
-        return AutoDiscovery(cotacoes, necessidade, cadastro, regras, homologacao, historico)
+        # Fallbacks aparecem depois dos caminhos oficiais, para permitir
+        # correção caso um arquivo tenha sido movido temporariamente.
+        if not cotacoes:
+            cotacoes = [x for x in items if 'cotacao' in _norm(x.name)]
+        if not planejamentos:
+            planejamentos = [x for x in items if 'planejamento' in _norm(x.name)]
+        if not regras:
+            regras = [x for x in items if 'regras fornecedor' in _norm(x.name)]
+        if not homologacoes:
+            homologacoes = [x for x in items if 'mapa de envio de pedidos' in _norm(x.name)]
+        if not historicos:
+            historicos = [x for x in items if 'mapa diario 2 0' in _norm(x.name)]
+
+        return {
+            'cotacoes': by_modified(cotacoes),
+            'planejamentos': by_modified(planejamentos),
+            'regras': by_modified(regras),
+            'homologacoes': by_modified(homologacoes),
+            'historicos': by_modified(historicos),
+        }
+
+    @staticmethod
+    def discover(files: Iterable[SharePointFile]) -> AutoDiscovery:
+        candidatos = SharePointConnector.candidates_by_role(files)
+        planejamento = candidatos['planejamentos'][0] if candidatos['planejamentos'] else None
+        return AutoDiscovery(
+            tuple(candidatos['cotacoes'][:5]),
+            planejamento,
+            planejamento,  # cadastro EAN/SKU vem da aba Ean do mesmo Planejamento
+            candidatos['regras'][0] if candidatos['regras'] else None,
+            candidatos['homologacoes'][0] if candidatos['homologacoes'] else None,
+            candidatos['historicos'][0] if candidatos['historicos'] else None,
+        )
 
     def download_file(self, item: SharePointFile, destination_dir: Path) -> Path:
         destination_dir.mkdir(parents=True, exist_ok=True)
