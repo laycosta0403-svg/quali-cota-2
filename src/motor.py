@@ -78,7 +78,7 @@ def _tipo_operacao_regra(registro: dict) -> str:
         return "Direto"
     if "distr" in norm:
         return "Distribuidor"
-    return str(valor or "")
+    return ""
 
 
 def _resolver_regra(regras_map: dict[str, dict], fornecedor: object) -> dict:
@@ -238,6 +238,10 @@ def _preparar_ofertas(
         (normalizar_texto(registro.get("ol_industria")), normalizar_texto(registro.get("fornecedor"))): booleano_sim(registro.get("ativo"))
         for registro in homologacao.to_dict("records")
     } if not homologacao.empty else {}
+    homologacao_tipo = {
+        (normalizar_texto(registro.get("ol_industria")), normalizar_texto(registro.get("fornecedor"))): str(registro.get("tipo_operacao") or "")
+        for registro in homologacao.to_dict("records")
+    } if not homologacao.empty else {}
 
     # Resolver a regra uma única vez por fornecedor. A cotação real tem cerca de
     # 129 mil linhas, mas somente poucas dezenas de fornecedores distintos.
@@ -259,7 +263,9 @@ def _preparar_ofertas(
         fornecedor = original.get("fornecedor", "")
         fornecedor_norm = normalizar_texto(fornecedor)
         regra = regras_resolvidas.get(fornecedor_norm, {})
-        tipo_operacao = original.get("tipo_operacao") or regra.get("tipo_operacao_resolvida", "")
+        tipo_operacao = _primeiro_preenchido(
+            original.get("tipo_operacao"), regra.get("tipo_operacao_resolvida", "")
+        )
         embalagem = max(1, int(numero(original.get("embalagem"), 1)))
         multiplo = max(1, int(numero(original.get("multiplo"), embalagem)))
         preco_final_base = numero(original.get("preco_final"), 0)
@@ -270,12 +276,14 @@ def _preparar_ofertas(
             preco_final_base = preco_fabrica * (1 - desconto_decimal)
         tipo_preco = normalizar_texto(original.get("tipo_preco"))
         estoque = max(0, int(numero(original.get("estoque_fornecedor"), 0)))
-        ol_norm = normalizar_texto(original.get("ol_industria"))
-        eh_ol = normalizar_texto(tipo_operacao) == "ol"
-        homologado = True if not eh_ol or not homologacao_map else homologacao_map.get((ol_norm, fornecedor_norm), False)
-
         for ean in eans:
             cad = por_ean.get(ean)
+            industria = _primeiro_preenchido(original.get("ol_industria"), (cad or {}).get("fabricante"))
+            ol_norm = normalizar_texto(industria)
+            tipo_homologacao = homologacao_tipo.get((ol_norm, fornecedor_norm), "")
+            tipo_operacao_item = tipo_operacao or tipo_homologacao
+            eh_ol = normalizar_texto(tipo_operacao_item) == "ol"
+            homologado = True if not eh_ol or not homologacao_map else homologacao_map.get((ol_norm, fornecedor_norm), False)
             divisor = max(embalagem, multiplo, int(numero((cad or {}).get("caixaria_padrao"), 1)))
             preco_unitario = preco_final_base / divisor if "caixa" in tipo_preco else preco_final_base
 
@@ -314,7 +322,8 @@ def _preparar_ofertas(
                     "fornecedor": fornecedor,
                     "fornecedor_regra": regra.get("fornecedor", ""),
                     "codigo_fornecedor": texto_codigo(original.get("codigo_fornecedor") or regra.get("codigo_fornecedor")),
-                    "tipo_operacao": tipo_operacao,
+                    "tipo_operacao": tipo_operacao_item or "Não informado",
+                    "ol_industria": industria or "Não informado",
                     "preco_fabrica": preco_fabrica,
                     "preco_final": preco_final_base,
                     "preco_unitario": round(preco_unitario, 6),
@@ -452,13 +461,17 @@ def _historico_atualizado(
         anterior = pd.DataFrame()
     elif "ID da carga" in anterior_interno.columns:
         anterior = anterior_interno.copy()
+        anterior = anterior.rename(columns={"Fornecedor": "Fornecedor da cotação"})
+        if "Código fornecedor" not in anterior.columns:
+            anterior.insert(min(3, len(anterior.columns)), "Código fornecedor", "")
     else:
         anterior = pd.DataFrame(
             {
                 "Data processamento": _col(anterior_interno, "data_processamento"),
                 "Data da carga": _col(anterior_interno, "data_carga"),
                 "ID da carga": _col(anterior_interno, "id_carga"),
-                "Fornecedor": _col(anterior_interno, "fornecedor"),
+                "Código fornecedor": _col(anterior_interno, "codigo_fornecedor"),
+                "Fornecedor da cotação": _col(anterior_interno, "fornecedor"),
                 "Tipo operação": _col(anterior_interno, "tipo_operacao"),
                 "OL / Indústria": _col(anterior_interno, "ol_industria"),
                 "SKU identificado": _col(anterior_interno, "sku").map(texto_codigo),
@@ -482,6 +495,13 @@ def _historico_atualizado(
                 "Observação sistema": _col(anterior_interno, "observacao_sistema"),
             }
         )
+    if not anterior.empty:
+        # Remove cabeçalhos antigos importados como se fossem registros.
+        fornecedor_col = "Fornecedor da cotação" if "Fornecedor da cotação" in anterior.columns else "Fornecedor"
+        mascara_cabecalho = anterior[fornecedor_col].map(normalizar_texto).isin({"fornecedor", "distribuidor"})
+        anterior = anterior.loc[~mascara_cabecalho].copy()
+        anterior["Origem do registro"] = anterior.get("Origem do registro", "Legado")
+
     # Enriquece registros legados com tudo que pode ser recuperado pelo EAN.
     # Datas e nomes de fornecedor que não existiam no arquivo original não são
     # inventados; esses casos ficam identificados na observação.
@@ -532,11 +552,13 @@ def _historico_atualizado(
     novos = pd.DataFrame(
         {
             "Data processamento": [agora] * len(ofertas),
+            "Origem do registro": ["Rodada atual"] * len(ofertas),
             "Data da carga": _col(ofertas, "data_carga").map(
                 lambda valor: valor if normalizar_texto(valor) else agora.date()
             ),
             "ID da carga": [id_carga] * len(ofertas),
-            "Fornecedor": _col(ofertas, "fornecedor"),
+            "Código fornecedor": _col(ofertas, "codigo_fornecedor"),
+            "Fornecedor da cotação": _col(ofertas, "fornecedor"),
             "Tipo operação": _col(ofertas, "tipo_operacao"),
             "OL / Indústria": _col(ofertas, "ol_industria"),
             "SKU identificado": _col(ofertas, "sku").map(texto_codigo),
@@ -599,6 +621,21 @@ def executar_motor(
     cadastro_n = _normalizar_cadastro(cadastro)
     regras_n = _normalizar_regras(regras_fornecedor, fornecedores_desativados)
     necessidade_n = _preparar_necessidade(necessidade, cadastro_n)
+
+    # A aba EAN contém apenas a relação SKU × EAN. Fabricante, descrição e
+    # categoria vêm de Volume de Compras. Enriquecemos o cadastro antes de
+    # validar homologação OL, pois a indústria é indispensável para cruzar
+    # indústria × distribuidor no Mapa de Envio de Pedidos.
+    if not cadastro_n.empty and not necessidade_n.empty:
+        meta_por_sku = necessidade_n.drop_duplicates("sku", keep="first").set_index("sku")
+        for coluna in ("descricao_oficial", "fabricante", "categoria"):
+            if coluna not in cadastro_n.columns:
+                cadastro_n[coluna] = ""
+            mapa = meta_por_sku[coluna].to_dict() if coluna in meta_por_sku.columns else {}
+            complemento = cadastro_n["sku"].map(mapa)
+            vazio = cadastro_n[coluna].map(lambda valor: not normalizar_texto(valor))
+            cadastro_n.loc[vazio, coluna] = complemento.loc[vazio]
+
     # Somente itens com Pedido Efetivo positivo entram no motor. Linhas zeradas
     # permanecem no Planejamento, mas não devem virar pedido nem pendência.
     necessidade_n = necessidade_n[necessidade_n["quantidade_ajustada"] > 0].reset_index(drop=True)
@@ -780,7 +817,7 @@ def executar_motor(
                 "ID da carga": id_carga,
                 "Loja": 1015,
                 "Ciclo": agora_brasil().strftime("%Y%m%d") + "/p1",
-                "Tratativa": "",
+                "Tratativa": recomendada.get("tipo_operacao", "Não informado"),
                 "Fabricante ": item.get("fabricante", ""),
                 "Categoria ": item.get("categoria", ""),
                 "Condição Pagamento": opcao1.get("prazo_pagamento", ""),
@@ -801,13 +838,16 @@ def executar_motor(
                 "Preço": numero(opcao1.get("preco_unitario")),
                 "Prazo Entrega": opcao1.get("lead_time", ""),
                 "Embalagem": int(item.get("multiplo", 1)),
-                "Tipo Condição": "",
+                "Tipo Condição": recomendada.get("tipo_operacao", "Não informado"),
                 "ComercialDiscount": 0,
                 "FinancialDiscount": 0,
                 "E-Mail": opcao1.get("email", ""),
                 "NR COTAÇÃO": id_carga,
                 "Comprador ": item.get("comprador", ""),
                 "Fornecedor recomendado": recomendada.get("fornecedor", ""),
+                "Tipo operação recomendado": recomendada.get("tipo_operacao", "Não informado"),
+                "OL / Indústria recomendada": recomendada.get("ol_industria", "Não informado"),
+                "Status homologação OL": recomendada.get("status_homologacao", "Não informado"),
                 "Preço recomendado": numero(recomendada.get("preco_unitario")),
                 "Estoque recomendado": int(recomendada.get("estoque_fornecedor", 0)),
                 "Origem recomendada": recomendada.get("origem", ""),

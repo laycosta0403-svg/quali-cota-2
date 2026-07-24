@@ -39,6 +39,7 @@ class SharePointConfig:
     root_folder: str = ""
     qualicota_root: str = "QualiCota"
     supply_root: str = "Supply"
+    structural_root: str = "Bases Estruturais"
     recursive: bool = True
     max_depth: int = 10
 
@@ -52,7 +53,7 @@ class SharePointConfig:
             raw["max_depth"] = max(1, min(int(raw.get("max_depth", 10)), 30))
         except (TypeError, ValueError):
             raw["max_depth"] = 10
-        for key in ("tenant_id", "client_id", "client_secret", "site_hostname", "site_path", "site_id", "drive_id", "library_name", "root_folder", "qualicota_root", "supply_root"):
+        for key in ("tenant_id", "client_id", "client_secret", "site_hostname", "site_path", "site_id", "drive_id", "library_name", "root_folder", "qualicota_root", "supply_root", "structural_root"):
             raw[key] = str(raw.get(key, "") or "").strip()
         config = cls(**raw)
         obrigatorios = {
@@ -221,7 +222,7 @@ class SharePointConnector:
     def list_configured_roots(self) -> list[SharePointFile]:
         roots = []
         prefix = self.config.root_folder.strip().strip("/")
-        for root in (self.config.qualicota_root, self.config.supply_root):
+        for root in (self.config.qualicota_root, self.config.supply_root, self.config.structural_root):
             root = str(root or "").strip().strip("/")
             if not root:
                 continue
@@ -319,6 +320,39 @@ class SharePointConnector:
         if not destino.exists() or destino.stat().st_size == 0:
             raise SharePointError(f'O arquivo "{item.name}" foi baixado vazio.')
         return destino
+
+
+    def ensure_folder(self, folder_path: str) -> str:
+        """Cria a árvore de pastas se necessário e retorna o item_id final."""
+        parts = [part for part in folder_path.strip().strip("/").split("/") if part]
+        parent_id = "root"
+        current = ""
+        for part in parts:
+            current = "/".join([current, part]).strip("/")
+            try:
+                url = f"{GRAPH_ROOT}/drives/{quote(self.drive_id(), safe='!')}/root:/{quote(current, safe='/')}"
+                parent_id = str(self._request("GET", url).json()["id"])
+                continue
+            except SharePointError:
+                pass
+            if parent_id == "root":
+                create_url = f"{GRAPH_ROOT}/drives/{quote(self.drive_id(), safe='!')}/root/children"
+            else:
+                create_url = f"{GRAPH_ROOT}/drives/{quote(self.drive_id(), safe='!')}/items/{quote(parent_id, safe='!')}/children"
+            payload = {"name": part, "folder": {}, "@microsoft.graph.conflictBehavior": "replace"}
+            parent_id = str(self._request("POST", create_url, json=payload).json()["id"])
+        return parent_id
+
+    def upload_file(self, local_path: Path, folder_path: str, remote_name: str | None = None) -> dict[str, str]:
+        """Envia arquivo ao SharePoint; usa upload simples até 250 MB."""
+        self.ensure_folder(folder_path)
+        name = remote_name or local_path.name
+        remote = "/".join(part for part in [folder_path.strip().strip("/"), name] if part)
+        url = f"{GRAPH_ROOT}/drives/{quote(self.drive_id(), safe='!')}/root:/{quote(remote, safe='/')}:/content"
+        headers = {"Content-Type": guess_mime_type(name)}
+        with local_path.open("rb") as fh:
+            payload = self._request("PUT", url, headers=headers, data=fh).json()
+        return {"id": str(payload.get("id", "")), "name": str(payload.get("name", name)), "web_url": str(payload.get("webUrl", ""))}
 
     def diagnostic(self) -> dict[str, str]:
         return {"site_id": self.site_id(), "drive_id": self.drive_id(), "library_name": self.config.library_name}

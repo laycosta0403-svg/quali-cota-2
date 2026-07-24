@@ -16,6 +16,7 @@ paginas = {
         st.Page("pages/dashboard.py", title="Dashboard", icon="📊", default=True),
         st.Page("pages/processamento.py", title="Processamento de Dados", icon="⚙️"),
         st.Page("pages/busca.py", title="Busca", icon="🔎"),
+        st.Page("pages/pendencias.py", title="Tratar pendências", icon="🧩"),
     ]
 }
 

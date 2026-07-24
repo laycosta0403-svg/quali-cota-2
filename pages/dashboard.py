@@ -62,16 +62,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3 = st.columns(3)
+c4, c5 = st.columns(2)
 valor_total = float(kpis["valor_total"])
-valor_exibido = (
-    f"R$ {valor_total / 1_000_000:.1f} mi".replace(".", ",")
-    if valor_total >= 1_000_000
-    else f"R$ {valor_total / 1_000:.1f} mil".replace(".", ",")
-    if valor_total >= 100_000
-    else f"R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-)
-c1.metric("Valor da compra", valor_exibido, help=f"Valor exato: R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+valor_exibido = f"R$ {valor_total:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+c1.metric("Valor da compra", valor_exibido)
 c2.metric("SKUs no pedido", f"{int(kpis['skus_pedido']):,}".replace(",", "."))
 c3.metric("Pendências", f"{int(kpis['pendencias']):,}".replace(",", "."))
 c4.metric("Sem oferta", f"{int(kpis['sem_cotacao']):,}".replace(",", "."))
@@ -98,26 +93,24 @@ st.markdown("### Compra por fornecedor")
 if por_fornecedor.empty:
     st.info("Nenhum item entrou no pedido.")
 else:
-    df_dist = por_fornecedor.sort_values("Valor total", ascending=True)
-    fig = px.bar(df_dist, x="Valor total", y="Fornecedor recomendado", orientation="h", text_auto=".2s")
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+    df_dist = por_fornecedor.sort_values("Valor total", ascending=True).copy()
+    fig = px.bar(
+        df_dist, x="Valor total", y="Fornecedor recomendado", orientation="h",
+        text="Valor total", hover_name="Fornecedor recomendado",
+        hover_data={"Fornecedor recomendado": False, "Valor total": ":,.2f"},
+    )
+    fig.update_traces(texttemplate="R$ %{x:,.0f}", textposition="outside", cliponaxis=False)
+    fig.update_yaxes(categoryorder="array", categoryarray=df_dist["Fornecedor recomendado"].tolist())
+    fig.update_layout(height=max(360, 28 * len(df_dist) + 100), margin=dict(l=10, r=80, t=10, b=10))
     st.plotly_chart(fig, width="stretch")
+    with st.expander("Ver valores por fornecedor"):
+        st.dataframe(df_dist.sort_values("Valor total", ascending=False), width="stretch", hide_index=True)
 
 if not altas.empty or not baixas.empty:
-    g1, g2 = st.columns(2)
-    with g1:
-        st.markdown("### Maiores aumentos")
-        if altas.empty:
-            st.info("Sem aumentos calculados.")
-        else:
-            fig_altas = px.bar(altas.sort_values("Variação"), x="Variação", y="Descrição", orientation="h", hover_data=["SKU"])
-            fig_altas.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_altas, width="stretch")
-    with g2:
-        st.markdown("### Maiores reduções")
-        if baixas.empty:
-            st.info("Sem reduções calculadas.")
-        else:
-            fig_baixas = px.bar(baixas.sort_values("Variação", ascending=False), x="Variação", y="Descrição", orientation="h", hover_data=["SKU"])
-            fig_baixas.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_baixas, width="stretch")
+    st.markdown("### Maiores variações de custo")
+    variacoes = pd.concat([
+        altas.assign(Movimento="Aumento"),
+        baixas.assign(Movimento="Redução"),
+    ], ignore_index=True)
+    variacoes["Variação"] = variacoes["Variação"].map(lambda v: f"{v:,.2f}%".replace(",", "X").replace(".", ",").replace("X", "."))
+    st.dataframe(variacoes[["Movimento", "SKU", "Descrição", "Variação"]], width="stretch", hide_index=True)

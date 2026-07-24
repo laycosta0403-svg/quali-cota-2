@@ -27,10 +27,9 @@ def gerar_outputs_rodada(resultado: ResultadoMotor, template: Path) -> list[Path
 
 
 def publicar_outputs_sharepoint(conector, resultado: ResultadoMotor, template: Path) -> tuple[str, list[dict[str, str]]]:
-    processado = resultado.resumo.get("processado_em")
-    ano = processado.strftime("%Y")
-    mes = processado.strftime("%m - %B")
-    pasta_remota = f"QualiCota/03 - Saída de Arquivos/{ano}/{mes}/{resultado.id_carga}"
+    # Os quatro arquivos ficam visíveis diretamente na pasta operacional.
+    # O ID da carga no nome evita sobrescrever rodadas anteriores.
+    pasta_remota = "QualiCota/03 - Saída de Arquivos"
     arquivos = gerar_outputs_rodada(resultado, template)
     publicados = [conector.upload_file(caminho, pasta_remota) for caminho in arquivos]
     # Base única de auditoria: substituída a cada rodada já consolidada e deduplicada.

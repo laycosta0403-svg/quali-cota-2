@@ -67,11 +67,22 @@ def _preparar_source(source: Source) -> Source:
     return source
 
 
+
+def _engine_excel(nome: str) -> str:
+    if not nome.endswith(".xlsb"):
+        return "openpyxl"
+    try:
+        import python_calamine  # noqa: F401
+        return "calamine"
+    except ImportError:
+        return "pyxlsb"
+
+
 def listar_abas(source: Source) -> list[str]:
     nome = _nome_arquivo(source).lower()
     if nome.endswith(".csv"):
         return ["CSV"]
-    engine = "calamine" if nome.endswith(".xlsb") else "openpyxl"
+    engine = _engine_excel(nome)
     source = _preparar_source(source)
     return pd.ExcelFile(source, engine=engine).sheet_names
 
@@ -81,7 +92,7 @@ def ler_bruto(source: Source, sheet_name: str | int | None = None) -> pd.DataFra
     source = _preparar_source(source)
     if nome.endswith(".csv"):
         return pd.read_csv(source, header=None, dtype=object, sep=None, engine="python")
-    engine = "calamine" if nome.endswith(".xlsb") else "openpyxl"
+    engine = _engine_excel(nome)
     return pd.read_excel(source, sheet_name=sheet_name or 0, header=None, dtype=object, engine=engine)
 
 
@@ -284,8 +295,9 @@ ALIASES_REGRAS = {
 }
 
 ALIASES_HOMOLOGACAO = {
-    "ol_industria": ["OL / Indústria", "OL", "Indústria"],
-    "fornecedor": ["Distribuidor", "Fornecedor"],
+    "ol_industria": ["OL / Indústria", "OL", "Indústria", "Fornecedor"],
+    "fornecedor": ["Distribuidor", "Distribuidores homologados (OL)"],
+    "tipo_operacao": ["Tipo operação", "Tem OL/Direto?"],
     "ativo": ["Ativo?", "Ativo"],
     "prioridade": ["Prioridade"],
 }
@@ -294,7 +306,8 @@ ALIASES_HISTORICO = {
     "data_processamento": ["Data processamento"],
     "data_carga": ["Data da carga"],
     "id_carga": ["ID da carga"],
-    "fornecedor": ["Fornecedor"],
+    "fornecedor": ["Fornecedor da cotação", "Fornecedor"],
+    "codigo_fornecedor": ["Código fornecedor", "Cod fornecedor"],
     "tipo_operacao": ["Tipo operação"],
     "ol_industria": ["OL / Indústria"],
     "sku": ["SKU identificado", "SKU"],

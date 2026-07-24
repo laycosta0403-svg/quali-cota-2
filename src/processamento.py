@@ -16,6 +16,7 @@ from src.leitura import (
     texto_codigo,
 )
 from src.motor import ResultadoMotor, executar_motor
+from src.homologacao import ler_mapa_envio
 from src.tempo import agora_brasil
 
 
@@ -135,7 +136,7 @@ def processar_arquivos(
 
     try:
         homologacao_df = (
-            ler_tabela(homologacao, ALIASES_HOMOLOGACAO, abas_preferidas=["homologacao", "ol"])
+            ler_mapa_envio(homologacao)
             if homologacao is not None else pd.DataFrame()
         )
     except Exception as exc:

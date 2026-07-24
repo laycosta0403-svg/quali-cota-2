@@ -157,3 +157,28 @@ def pasta_downloads(id_carga: str | None = None) -> Path:
     pasta = _pasta_rodada(id_carga) / "downloads"
     pasta.mkdir(parents=True, exist_ok=True)
     return pasta
+
+
+def salvar_tabela(nome: str, df: pd.DataFrame, id_carga: str | None = None) -> Path:
+    """Atualiza uma tabela persistida da rodada sem reprocessar todas as bases."""
+    if nome not in _TABELAS:
+        raise ValueError(f"Tabela persistida desconhecida: {nome}")
+    id_carga = id_carga or obter_ultimo_id()
+    if not id_carga:
+        raise ValueError("Nenhuma rodada persistida foi encontrada.")
+    pasta = _pasta_rodada(id_carga)
+    pasta.mkdir(parents=True, exist_ok=True)
+    destino = pasta / _TABELAS[nome]
+    df.to_csv(destino, index=False, compression="gzip")
+    return destino
+
+
+def salvar_auditoria_pendencias(id_carga: str, auditoria: pd.DataFrame) -> Path:
+    pasta = _pasta_rodada(id_carga)
+    pasta.mkdir(parents=True, exist_ok=True)
+    destino = pasta / "auditoria_pendencias.csv.gz"
+    if destino.exists():
+        anterior = pd.read_csv(destino, compression="gzip", low_memory=False)
+        auditoria = pd.concat([anterior, auditoria], ignore_index=True, sort=False)
+    auditoria.to_csv(destino, index=False, compression="gzip")
+    return destino

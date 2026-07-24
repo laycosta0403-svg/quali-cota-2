@@ -12,6 +12,7 @@ from src.exportacao import (
     gerar_pedido_unificado_arquivo,
     gerar_resumo_excel_arquivo,
 )
+from src.publicacao import publicar_outputs_sharepoint
 from src.persistencia import (
     carregar_metadata,
     carregar_resultado,
@@ -218,6 +219,17 @@ if st.button("⚙️ Processar motor", type="primary", width="stretch", disabled
             )
         status.write(f"**{etapas[-1]}...**")
         salvar_resultado(resultado)
+        if modo == "SharePoint automático" and conector is not None:
+            status.write("**Publicando outputs no SharePoint...**")
+            template = Path(__file__).resolve().parents[1] / "templates" / "Modelo Envio Pedidos Fornecedor_Medicamentos.xlsx"
+            try:
+                pasta_remota, publicados = publicar_outputs_sharepoint(conector, resultado, template)
+                resultado.diagnostico["pasta_outputs_sharepoint"] = pasta_remota
+                resultado.diagnostico["outputs_publicados"] = [item.get("name", "") for item in publicados]
+                salvar_resultado(resultado)
+                st.session_state["qc_publicacao"] = f"{len(publicados)} outputs enviados para {pasta_remota}"
+            except Exception as exc_upload:
+                st.session_state["qc_publicacao_erro"] = str(exc_upload)
         st.session_state["qc_id_carga"] = resultado.id_carga
         st.session_state.pop("qc_resultado", None)
         st.session_state.pop("qc_download_path", None)
@@ -244,6 +256,10 @@ if metadata is not None:
     st.divider()
     st.markdown("### 3. Resultado da rodada")
     st.success(f"**ID da carga:** `{id_carga}`")
+    if st.session_state.get("qc_publicacao"):
+        st.success(st.session_state.pop("qc_publicacao"))
+    if st.session_state.get("qc_publicacao_erro"):
+        st.warning("A rodada foi salva, mas o upload automático falhou: " + st.session_state.pop("qc_publicacao_erro"))
     st.info(
         f'**Aba lida:** {diagnostico.get("aba_necessidade", "—")}  ·  '
         f'**SKUs com Pedido Efetivo:** {int(diagnostico.get("skus_com_pedido", 0)):,}  ·  '

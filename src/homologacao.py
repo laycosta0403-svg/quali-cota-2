@@ -15,8 +15,15 @@ ALIASES_MAPA_ENVIO = {
 }
 
 
-def _partes(valor: object) -> list[str]:
-    return [p.strip() for p in re.split(r'[;|\n]+', str(valor or '')) if p.strip()]
+def _partes(valor: object, separar_hifen: bool = False) -> list[str]:
+    if valor is None or pd.isna(valor):
+        return []
+    texto = str(valor).strip()
+    if not texto or normalizar_texto(texto) in {'nan', 'none'}:
+        return []
+    padrao = r'[;|\n]+' if not separar_hifen else r'[;|\n]+|\s*-\s*'
+    return [parte.strip() for parte in re.split(padrao, texto) if parte.strip()]
+
 
 
 def ler_mapa_envio(arquivo) -> pd.DataFrame:
@@ -41,11 +48,13 @@ def ler_mapa_envio(arquivo) -> pd.DataFrame:
         else:
             tipo_resolvido = 'Não informado'
         aliases_industria = list(dict.fromkeys([industria, *_partes(reg.get('sinonimos'))]))
-        distribuidores = _partes(reg.get('distribuidores'))
+        distribuidores = _partes(reg.get('distribuidores'), separar_hifen=True)
         if tipo_resolvido == 'Direto' and not distribuidores:
             distribuidores = [industria]
         if not distribuidores:
-            distribuidores = ['']
+            # OL sem distribuidor cadastrado permanece não homologada; não criamos
+            # uma relação vazia que poderia produzir falsos positivos.
+            continue
         for alias in aliases_industria:
             for distribuidor in distribuidores:
                 linhas.append({
