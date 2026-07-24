@@ -1,0 +1,17 @@
+QUALI COTA — HOTFIX 02
+
+Corrige o erro:
+Data must be 1-dimensional, got ndarray of shape (..., 2) instead
+
+Arquivos alterados:
+- src/leitura.py
+- src/motor.py
+- tests/test_motor.py
+
+Instalação:
+1. Copie as pastas src e tests deste pacote.
+2. Cole na raiz do repositório local quali-cota-2.
+3. Confirme Mesclar/Substituir quando o Windows perguntar.
+4. Faça commit e Push origin pelo GitHub Desktop.
+
+Não altere os Secrets do Streamlit.

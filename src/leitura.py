@@ -152,6 +152,35 @@ def _mapear_colunas(colunas: Iterable[object], aliases: Mapping[str, Sequence[st
     return resultado
 
 
+def consolidar_colunas_duplicadas(df: pd.DataFrame) -> pd.DataFrame:
+    """Une colunas com o mesmo nome sem descartar valores preenchidos.
+
+    Alguns arquivos legados possuem cabeçalhos repetidos. Depois do mapeamento
+    de aliases, o pandas pode manter duas colunas com o mesmo nome canônico.
+    Nesses casos escolhemos, linha a linha, o primeiro valor não vazio.
+    """
+    if df.empty or not df.columns.duplicated().any():
+        return df
+
+    ordem = list(dict.fromkeys(df.columns.tolist()))
+    consolidadas: dict[object, pd.Series] = {}
+    for nome in ordem:
+        bloco = df.loc[:, df.columns == nome]
+        if isinstance(bloco, pd.Series):
+            serie = bloco
+        elif bloco.shape[1] == 1:
+            serie = bloco.iloc[:, 0]
+        else:
+            tratado = bloco.copy()
+            tratado = tratado.replace(r"^\s*$", pd.NA, regex=True)
+            serie = tratado.bfill(axis=1).iloc[:, 0]
+        consolidadas[nome] = serie
+
+    resultado = pd.DataFrame(consolidadas, index=df.index)
+    resultado.attrs.update(df.attrs)
+    return resultado
+
+
 def ler_tabela(
     source: Source,
     aliases: Mapping[str, Sequence[str]],
@@ -193,6 +222,7 @@ def ler_tabela(
             dados = dados.dropna(how="all").reset_index(drop=True)
             mapa = _mapear_colunas(dados.columns, aliases)
             dados = dados.rename(columns=mapa)
+            dados = consolidar_colunas_duplicadas(dados)
             reconhecidas_set = set(mapa.values())
             reconhecidas = len(reconhecidas_set)
             if melhor is None or reconhecidas > melhor[0]:

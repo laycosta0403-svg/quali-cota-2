@@ -88,3 +88,34 @@ class TestMotor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_historico_aceita_colunas_canonicas_duplicadas():
+    import pandas as pd
+    from src.motor import _historico_atualizado
+
+    historico = pd.DataFrame(
+        [
+            ["2026-07-20", "2026-07-20", "QDC_ANTIGO", "", "SOLFARMA", "123", "789"],
+            ["2026-07-20", "2026-07-20", "QDC_ANTIGO", "PANPHARMA", "", "456", "987"],
+        ],
+        columns=[
+            "data_processamento",
+            "data_carga",
+            "id_carga",
+            "fornecedor",
+            "fornecedor",
+            "sku",
+            "ean",
+        ],
+    )
+
+    resultado = _historico_atualizado(
+        historico=historico,
+        ofertas=pd.DataFrame(),
+        id_carga="QDC_NOVO",
+        cadastro=pd.DataFrame(),
+    )
+
+    assert resultado["Fornecedor da cotação"].tolist() == ["SOLFARMA", "PANPHARMA"]
+    assert not resultado.columns.duplicated().any()
