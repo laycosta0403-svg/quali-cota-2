@@ -16,6 +16,8 @@ from src.leitura import (
 from src.tempo import agora_brasil, agora_brasil_sem_fuso
 
 
+PATCH_MOTOR = "HF-HIST-03"
+
 @dataclass
 class ResultadoMotor:
     id_carga: str
@@ -118,24 +120,32 @@ def _resolver_regra(regras_map: dict[str, dict], fornecedor: object) -> dict:
 
 
 def _col(df: pd.DataFrame, nome: str, padrao: object = "") -> pd.Series:
-    """Retorna sempre uma Series, mesmo quando há cabeçalhos duplicados.
+    """Retorna uma coluna sempre como Series unidimensional.
 
-    Arquivos históricos antigos podem conter duas colunas que, após a
-    normalização, recebem o mesmo nome. ``df[nome]`` então devolve um
-    DataFrame bidimensional e quebra a montagem do histórico. Aqui as colunas
-    duplicadas são consolidadas linha a linha pelo primeiro valor preenchido.
+    Bases históricas podem conter dois cabeçalhos que, após a normalização,
+    recebem o mesmo nome canônico (por exemplo, duas colunas ``fabricante``).
+    Nessa situação ``df[nome]`` devolve um DataFrame 2D e a criação do novo
+    histórico falha. Consolidamos as duplicadas, linha a linha, usando o
+    primeiro valor preenchido.
     """
     if nome not in df.columns:
         return pd.Series([padrao] * len(df), index=df.index, dtype=object)
 
     selecionado = df.loc[:, df.columns == nome]
     if isinstance(selecionado, pd.Series):
-        return selecionado
-    if selecionado.shape[1] == 1:
-        return selecionado.iloc[:, 0]
+        serie = selecionado
+    elif selecionado.shape[1] == 1:
+        serie = selecionado.iloc[:, 0]
+    else:
+        tratado = selecionado.copy()
+        tratado = tratado.replace(r"^\s*$", pd.NA, regex=True)
+        serie = tratado.bfill(axis=1).iloc[:, 0]
 
-    tratado = selecionado.copy().replace(r"^\s*$", pd.NA, regex=True)
-    return tratado.bfill(axis=1).iloc[:, 0].fillna(padrao)
+    # Defesa adicional para qualquer retorno 2D vindo de uma versão futura
+    # do pandas ou de um índice de colunas não convencional.
+    if isinstance(serie, pd.DataFrame):
+        serie = serie.bfill(axis=1).iloc[:, 0]
+    return pd.Series(serie, index=df.index).fillna(padrao)
 
 
 def _normalizar_cadastro(df: pd.DataFrame) -> pd.DataFrame:
@@ -611,17 +621,7 @@ def _historico_atualizado(
     )
 
     combinado = pd.concat([anterior, novos], ignore_index=True, sort=False)
-    chaves = [
-        c
-        for c in [
-            "ID da carga",
-            "Fornecedor da cotação",
-            "EAN tratado",
-            "SKU identificado",
-            "Preço unitário",
-        ]
-        if c in combinado.columns
-    ]
+    chaves = [c for c in ["ID da carga", "Fornecedor", "EAN tratado", "SKU identificado", "Preço unitário"] if c in combinado.columns]
     if chaves:
         combinado = combinado.drop_duplicates(subset=chaves, keep="last")
     return combinado.reset_index(drop=True)
