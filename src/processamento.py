@@ -12,6 +12,7 @@ from src.leitura import (
     ALIASES_NECESSIDADE,
     ALIASES_REGRAS,
     ler_tabela,
+    ler_historico,
     numero,
     texto_codigo,
 )
@@ -145,7 +146,7 @@ def processar_arquivos(
 
     try:
         historico_df = (
-            ler_tabela(historico, ALIASES_HISTORICO, abas_preferidas=["historico"])
+            ler_historico(historico)
             if historico is not None else pd.DataFrame()
         )
     except Exception as exc:
@@ -167,6 +168,9 @@ def processar_arquivos(
         "arquivo_regras": _nome_arquivo(regras) if regras is not None else "Não selecionado",
         "arquivo_homologacao": _nome_arquivo(homologacao) if homologacao is not None else "Não selecionado",
         "arquivo_historico": _nome_arquivo(historico) if historico is not None else "Não selecionado",
+        "formato_historico": historico_df.attrs.get("formato_historico", "Não identificado"),
+        "aba_historico": historico_df.attrs.get("aba_lida", ""),
+        "classificacoes_historicas": historico_df.attrs.get("registros_classificacao", 0),
     }
 
     return executar_motor(

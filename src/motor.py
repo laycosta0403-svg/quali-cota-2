@@ -16,7 +16,7 @@ from src.leitura import (
 from src.tempo import agora_brasil, agora_brasil_sem_fuso
 
 
-PATCH_MOTOR = "HF-HIST-04"
+PATCH_MOTOR = "MVP-HIST-CLASS-05"
 
 @dataclass
 class ResultadoMotor:
@@ -81,6 +81,41 @@ def _tipo_operacao_regra(registro: dict) -> str:
     if "distr" in norm:
         return "Distribuidor"
     return ""
+
+
+def _normalizar_tipo_operacao(valor: object) -> str:
+    """Padroniza a classificação por item usada no Pedido Unificado."""
+    norm = normalizar_texto(valor)
+    if norm in {"ol", "online"} or norm.startswith("ol "):
+        return "OL"
+    if "direto" in norm or norm in {"dt", "direta"}:
+        return "Direto"
+    if norm in {"dist", "distribuidor", "distribuicao"} or "distr" in norm:
+        return "Distribuidor"
+    return ""
+
+
+def _mapas_classificacao_historica(historico: pd.DataFrame) -> tuple[dict[str, str], dict[str, str]]:
+    """Retorna a classificação do Mapa Diário por SKU e por EAN.
+
+    O Mapa Diário é uma referência de produto, portanto tem prioridade sobre
+    regras genéricas do fornecedor. Históricos consolidados não entram aqui.
+    """
+    if historico.empty or historico.attrs.get("formato_historico") != "mapa_diario":
+        return {}, {}
+    por_sku: dict[str, str] = {}
+    por_ean: dict[str, str] = {}
+    for registro in historico.to_dict("records"):
+        tipo = _normalizar_tipo_operacao(registro.get("tipo_operacao"))
+        if not tipo:
+            continue
+        sku = texto_codigo(registro.get("sku"))
+        ean = texto_codigo(registro.get("ean"))
+        if sku:
+            por_sku[sku] = tipo
+        if ean:
+            por_ean[ean] = tipo
+    return por_sku, por_ean
 
 
 def _resolver_regra(regras_map: dict[str, dict], fornecedor: object) -> dict:
@@ -285,8 +320,12 @@ def _preparar_ofertas(
     regras: pd.DataFrame,
     homologacao: pd.DataFrame,
     eans_interesse: set[str] | None = None,
+    tipo_historico_por_sku: dict[str, str] | None = None,
+    tipo_historico_por_ean: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     por_ean, _ = _mapa_cadastro(cadastro)
+    tipo_historico_por_sku = tipo_historico_por_sku or {}
+    tipo_historico_por_ean = tipo_historico_por_ean or {}
     regras_map = {
         str(registro.get("fornecedor_norm", "")): registro
         for registro in regras.to_dict("records")
@@ -339,7 +378,14 @@ def _preparar_ofertas(
             industria = _primeiro_preenchido(original.get("ol_industria"), (cad or {}).get("fabricante"))
             ol_norm = normalizar_texto(industria)
             tipo_homologacao = homologacao_tipo.get((ol_norm, fornecedor_norm), "")
-            tipo_operacao_item = tipo_operacao or tipo_homologacao
+            sku_item = texto_codigo((cad or {}).get("sku"))
+            tipo_historico = _primeiro_preenchido(
+                tipo_historico_por_sku.get(sku_item, ""),
+                tipo_historico_por_ean.get(ean, ""),
+            )
+            tipo_operacao_item = _normalizar_tipo_operacao(
+                _primeiro_preenchido(tipo_historico, tipo_operacao, tipo_homologacao)
+            ) or "Não informado"
             eh_ol = normalizar_texto(tipo_operacao_item) == "ol"
             homologado = True if not eh_ol or not homologacao_map else homologacao_map.get((ol_norm, fornecedor_norm), False)
             divisor = max(embalagem, multiplo, int(numero((cad or {}).get("caixaria_padrao"), 1)))
@@ -425,7 +471,11 @@ def _ofertas_historico(
     regras: pd.DataFrame,
     quantidade: int,
 ) -> pd.DataFrame:
-    if historico.empty or not sku:
+    if (
+        historico.empty
+        or not sku
+        or historico.attrs.get("uso_busca_ampliada") is False
+    ):
         return pd.DataFrame()
     hist = historico.copy()
     hist["sku"] = _col(hist, "sku").map(texto_codigo)
@@ -514,7 +564,14 @@ def _motivos_rejeicao_item(ofertas: pd.DataFrame, sku: str, ean: str) -> list[tu
 def _historico_atualizado(
     historico: pd.DataFrame, ofertas: pd.DataFrame, id_carga: str, cadastro: pd.DataFrame
 ) -> pd.DataFrame:
-    anterior_interno = historico.copy() if historico is not None else pd.DataFrame()
+    eh_mapa_diario = bool(
+        historico is not None
+        and historico.attrs.get("formato_historico") == "mapa_diario"
+    )
+    anterior_interno = (
+        pd.DataFrame() if eh_mapa_diario
+        else (historico.copy() if historico is not None else pd.DataFrame())
+    )
     if anterior_interno.empty:
         anterior = pd.DataFrame()
     elif "ID da carga" in anterior_interno.columns:
@@ -727,8 +784,17 @@ def executar_motor(
         if not _resolver_regra(regras_map, fornecedor)
     ])
 
+    tipo_historico_por_sku, tipo_historico_por_ean = _mapas_classificacao_historica(historico)
+    diagnostico["classificacoes_historicas_por_sku"] = len(tipo_historico_por_sku)
+
     ofertas = _preparar_ofertas(
-        cotacao, cadastro_n, regras_n, homologacao_ol, eans_interesse=eans_interesse
+        cotacao,
+        cadastro_n,
+        regras_n,
+        homologacao_ol,
+        eans_interesse=eans_interesse,
+        tipo_historico_por_sku=tipo_historico_por_sku,
+        tipo_historico_por_ean=tipo_historico_por_ean,
     )
     diagnostico["linhas_cotacao_relevantes"] = len(ofertas)
     ofertas = _enriquecer_ofertas_com_necessidade(ofertas, necessidade_n)

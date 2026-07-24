@@ -152,35 +152,6 @@ def _mapear_colunas(colunas: Iterable[object], aliases: Mapping[str, Sequence[st
     return resultado
 
 
-def consolidar_colunas_duplicadas(df: pd.DataFrame) -> pd.DataFrame:
-    """Une colunas com o mesmo nome sem descartar valores preenchidos.
-
-    Alguns arquivos legados possuem cabeçalhos repetidos. Depois do mapeamento
-    de aliases, o pandas pode manter duas colunas com o mesmo nome canônico.
-    Nesses casos escolhemos, linha a linha, o primeiro valor não vazio.
-    """
-    if df.empty or not df.columns.duplicated().any():
-        return df
-
-    ordem = list(dict.fromkeys(df.columns.tolist()))
-    consolidadas: dict[object, pd.Series] = {}
-    for nome in ordem:
-        bloco = df.loc[:, df.columns == nome]
-        if isinstance(bloco, pd.Series):
-            serie = bloco
-        elif bloco.shape[1] == 1:
-            serie = bloco.iloc[:, 0]
-        else:
-            tratado = bloco.copy()
-            tratado = tratado.replace(r"^\s*$", pd.NA, regex=True)
-            serie = tratado.bfill(axis=1).iloc[:, 0]
-        consolidadas[nome] = serie
-
-    resultado = pd.DataFrame(consolidadas, index=df.index)
-    resultado.attrs.update(df.attrs)
-    return resultado
-
-
 def ler_tabela(
     source: Source,
     aliases: Mapping[str, Sequence[str]],
@@ -222,7 +193,6 @@ def ler_tabela(
             dados = dados.dropna(how="all").reset_index(drop=True)
             mapa = _mapear_colunas(dados.columns, aliases)
             dados = dados.rename(columns=mapa)
-            dados = consolidar_colunas_duplicadas(dados)
             reconhecidas_set = set(mapa.values())
             reconhecidas = len(reconhecidas_set)
             if melhor is None or reconhecidas > melhor[0]:
@@ -360,3 +330,113 @@ ALIASES_HISTORICO = {
     "status_homologacao": ["Status homologação OL"],
     "observacao_sistema": ["Observação sistema"],
 }
+
+def _coluna_por_alias_posicional(colunas: Sequence[object], aliases: Sequence[str]) -> object | None:
+    """Localiza uma coluna preservando a posição física no arquivo."""
+    aliases_norm = {normalizar_texto(alias) for alias in aliases}
+    for coluna in colunas:
+        if normalizar_texto(coluna) in aliases_norm:
+            return coluna
+    return None
+
+
+def ler_historico(source: Source) -> pd.DataFrame:
+    """Lê tanto o histórico consolidado quanto o Mapa Diário legado.
+
+    O arquivo ``mapa diario 2.0`` não é uma tabela de histórico tradicional:
+    sua classificação de compra fica na aba ``Planilha1``, com o cabeçalho na
+    segunda linha. Ler todas as dezenas de abas fazia o aplicativo consumir
+    muita memória e interpretar colunas duplicadas como estruturas 2D.
+
+    Para esse formato carregamos somente A:H de ``Planilha1`` e o usamos como
+    referência de classificação por SKU/EAN. Ele não participa da busca
+    ampliada nem é anexado ao histórico consolidado da rodada.
+    """
+    nome = _nome_arquivo(source).lower()
+    if nome.endswith(".csv"):
+        return ler_tabela(source, ALIASES_HISTORICO, abas_preferidas=["historico"])
+
+    engine = _engine_excel(nome)
+    # O nome oficial do legado é estável e permite evitar abrir as mais de 60
+    # abas apenas para descobri-las. Isso reduz bastante o tempo e a memória.
+    if "mapa diario" in normalizar_texto(nome):
+        candidatas = ["Planilha1"]
+    else:
+        abas = listar_abas(source)
+        candidatas = [aba for aba in abas if normalizar_texto(aba) == "planilha1"]
+        candidatas.extend(aba for aba in abas if aba not in candidatas)
+
+    for aba in candidatas[:5]:
+        try:
+            preview = pd.read_excel(
+                _preparar_source(source),
+                sheet_name=aba,
+                header=None,
+                nrows=8,
+                usecols="A:H",
+                dtype=object,
+                engine=engine,
+            )
+        except Exception:
+            continue
+
+        linha_cabecalho = None
+        for idx in range(len(preview)):
+            valores = {normalizar_texto(v) for v in preview.iloc[idx].tolist() if normalizar_texto(v)}
+            if "codigo" in valores and "ol direto dist" in valores:
+                linha_cabecalho = idx
+                break
+        if linha_cabecalho is None:
+            continue
+
+        bruto = pd.read_excel(
+            _preparar_source(source),
+            sheet_name=aba,
+            header=linha_cabecalho,
+            usecols="A:H",
+            dtype=object,
+            engine=engine,
+        )
+        col_sku = _coluna_por_alias_posicional(bruto.columns, ["Código", "SKU"])
+        col_ean = _coluna_por_alias_posicional(bruto.columns, ["EAN", "Código de barras"])
+        col_descricao = _coluna_por_alias_posicional(bruto.columns, ["Descrição", "Produto"])
+        col_tipo = _coluna_por_alias_posicional(bruto.columns, ["OL/DIRETO/DIST", "Tipo operação"])
+        col_van = _coluna_por_alias_posicional(bruto.columns, ["VAN"])
+        col_fabricante = _coluna_por_alias_posicional(bruto.columns, ["FABRICANTE", "Fabricante"])
+        col_codigo_direto = _coluna_por_alias_posicional(bruto.columns, ["Cód Direto", "Código direto"])
+
+        if col_sku is None or col_tipo is None:
+            continue
+
+        resultado = pd.DataFrame(index=bruto.index)
+        resultado["sku"] = bruto[col_sku].map(texto_codigo)
+        resultado["ean"] = bruto[col_ean].map(texto_codigo) if col_ean is not None else ""
+        resultado["descricao_oficial"] = bruto[col_descricao] if col_descricao is not None else ""
+        resultado["tipo_operacao"] = bruto[col_tipo]
+        resultado["van"] = bruto[col_van] if col_van is not None else ""
+        resultado["fabricante"] = bruto[col_fabricante] if col_fabricante is not None else ""
+        resultado["codigo_direto"] = bruto[col_codigo_direto].map(texto_codigo) if col_codigo_direto is not None else ""
+        resultado = resultado[resultado["sku"].map(bool)].copy()
+        resultado["_tipo_preenchido"] = resultado["tipo_operacao"].map(
+            lambda valor: bool(normalizar_texto(valor))
+        )
+        resultado = (
+            resultado.sort_values(["sku", "_tipo_preenchido"], kind="stable")
+            .drop_duplicates(subset=["sku"], keep="last")
+            .drop(columns=["_tipo_preenchido"])
+            .reset_index(drop=True)
+        )
+        resultado.attrs["formato_historico"] = "mapa_diario"
+        resultado.attrs["aba_lida"] = aba
+        resultado.attrs["linha_cabecalho"] = linha_cabecalho + 1
+        resultado.attrs["uso_busca_ampliada"] = False
+        resultado.attrs["registros_classificacao"] = int(
+            resultado["tipo_operacao"].map(lambda v: bool(normalizar_texto(v))).sum()
+        )
+        return resultado
+
+    resultado = ler_tabela(source, ALIASES_HISTORICO, abas_preferidas=["historico"])
+    resultado.attrs["formato_historico"] = "historico_consolidado"
+    resultado.attrs["uso_busca_ampliada"] = True
+    return resultado
+

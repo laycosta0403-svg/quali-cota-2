@@ -4,10 +4,11 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from src.exportacao import gerar_pedido_unificado
 from src.motor import executar_motor
+from src.leitura import ler_historico
 
 
 class TestMotor(unittest.TestCase):
@@ -71,6 +72,47 @@ class TestMotor(unittest.TestCase):
         self.assertEqual(resultado.pedido.iloc[0]["Fornecedor recomendado"], "SOLFARMA")
         self.assertEqual(resultado.diagnostico.get("fornecedores_sem_regra"), [])
 
+    def test_leitor_mapa_diario_carrega_apenas_classificacao(self) -> None:
+        caminho = Path("/tmp/mapa diario teste.xlsx")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Planilha1"
+        ws.append(["controle"])
+        ws.append(["Código", "EAN", "", "Descrição", "OL/DIRETO/DIST", "VAN", "FABRICANTE ", "Cód Direto"])
+        ws.append([1, 111, "", "Produto A", "OL", "VAN A", "FAB A", ""])
+        ws.append([2, 222, "", "Produto B", "DIRETO", "VAN B", "FAB B", 999])
+        wb.save(caminho)
+        lido = ler_historico(caminho)
+        self.assertEqual(lido.attrs.get("formato_historico"), "mapa_diario")
+        self.assertFalse(lido.attrs.get("uso_busca_ampliada"))
+        self.assertEqual(lido.set_index("sku").loc["1", "tipo_operacao"], "OL")
+        self.assertEqual(lido.set_index("sku").loc["2", "tipo_operacao"], "DIRETO")
+
+    def test_mapa_diario_classifica_por_sku(self) -> None:
+        historico = pd.DataFrame(
+            [
+                ["1", "111", "OL"],
+                ["2", "222", "DIRETO"],
+                ["3", "334", "DIST"],
+            ],
+            columns=["sku", "ean", "tipo_operacao"],
+        )
+        historico.attrs["formato_historico"] = "mapa_diario"
+        historico.attrs["uso_busca_ampliada"] = False
+
+        cotacao = self.cotacao.copy()
+        cotacao["tipo_operacao"] = ""
+        resultado = executar_motor(
+            cotacao, self.necessidade, self.cadastro, self.regras, historico=historico
+        )
+        tipos = resultado.pedido.set_index("SKU")["Tratativa"].to_dict()
+        self.assertEqual(tipos["1"], "OL")
+        self.assertEqual(tipos["2"], "Direto")
+        self.assertEqual(tipos["3"], "Distribuidor")
+        # O Mapa Diário é referência de classificação, não um histórico de
+        # ofertas a ser anexado ao arquivo consolidado.
+        self.assertNotIn("mapa_diario", set(resultado.historico.get("Origem do registro", [])))
+
     def test_template_mantem_estrutura(self) -> None:
         resultado = executar_motor(self.cotacao, self.necessidade, self.cadastro, self.regras)
         template = Path(__file__).resolve().parents[1] / "templates" / "Modelo Envio Pedidos Fornecedor_Medicamentos.xlsx"
@@ -88,34 +130,3 @@ class TestMotor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-def test_historico_aceita_colunas_canonicas_duplicadas():
-    import pandas as pd
-    from src.motor import _historico_atualizado
-
-    historico = pd.DataFrame(
-        [
-            ["2026-07-20", "2026-07-20", "QDC_ANTIGO", "", "SOLFARMA", "123", "789"],
-            ["2026-07-20", "2026-07-20", "QDC_ANTIGO", "PANPHARMA", "", "456", "987"],
-        ],
-        columns=[
-            "data_processamento",
-            "data_carga",
-            "id_carga",
-            "fornecedor",
-            "fornecedor",
-            "sku",
-            "ean",
-        ],
-    )
-
-    resultado = _historico_atualizado(
-        historico=historico,
-        ofertas=pd.DataFrame(),
-        id_carga="QDC_NOVO",
-        cadastro=pd.DataFrame(),
-    )
-
-    assert resultado["Fornecedor da cotação"].tolist() == ["SOLFARMA", "PANPHARMA"]
-    assert not resultado.columns.duplicated().any()
