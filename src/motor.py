@@ -16,7 +16,7 @@ from src.leitura import (
 from src.tempo import agora_brasil, agora_brasil_sem_fuso
 
 
-PATCH_MOTOR = "HF-HIST-03"
+PATCH_MOTOR = "HF-HIST-04"
 
 @dataclass
 class ResultadoMotor:
@@ -119,33 +119,66 @@ def _resolver_regra(regras_map: dict[str, dict], fornecedor: object) -> dict:
     return {}
 
 
-def _col(df: pd.DataFrame, nome: str, padrao: object = "") -> pd.Series:
-    """Retorna uma coluna sempre como Series unidimensional.
+def _valor_escalar(valor: object, padrao: object = "") -> object:
+    """Converte qualquer célula inesperadamente vetorial em um único escalar.
 
-    Bases históricas podem conter dois cabeçalhos que, após a normalização,
-    recebem o mesmo nome canônico (por exemplo, duas colunas ``fabricante``).
-    Nessa situação ``df[nome]`` devolve um DataFrame 2D e a criação do novo
-    histórico falha. Consolidamos as duplicadas, linha a linha, usando o
-    primeiro valor preenchido.
+    Alguns históricos antigos possuem cabeçalhos duplicados e, dependendo de
+    como o Excel foi lido, uma célula pode chegar como Series, ndarray ou lista.
+    O pandas não aceita esses objetos 2D na montagem de um DataFrame por dicionário.
     """
-    if nome not in df.columns:
+    if isinstance(valor, pd.DataFrame):
+        valor = valor.to_numpy(dtype=object).ravel().tolist()
+    elif isinstance(valor, pd.Series):
+        valor = valor.tolist()
+    elif hasattr(valor, "ndim") and getattr(valor, "ndim", 0) > 0 and not isinstance(valor, (str, bytes)):
+        try:
+            valor = list(valor.ravel())
+        except Exception:
+            try:
+                valor = list(valor)
+            except Exception:
+                pass
+
+    if isinstance(valor, (list, tuple)):
+        for item in valor:
+            escolhido = _valor_escalar(item, padrao=pd.NA)
+            if not pd.isna(escolhido) and str(escolhido).strip() not in {"", "nan", "None"}:
+                return escolhido
+        return padrao
+
+    try:
+        if pd.isna(valor):
+            return padrao
+    except (TypeError, ValueError):
+        return padrao
+    if isinstance(valor, str) and not valor.strip():
+        return padrao
+    return valor
+
+
+def _col(df: pd.DataFrame, nome: str, padrao: object = "") -> pd.Series:
+    """Retorna sempre uma Series 1D, mesmo com cabeçalhos duplicados.
+
+    A seleção é feita por posição, não por rótulo. Isso evita que o pandas
+    devolva um DataFrame 2D quando existem duas ou mais colunas com o mesmo
+    nome canônico no histórico legado.
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.Series(dtype=object)
+
+    posicoes = [i for i, coluna in enumerate(list(df.columns)) if coluna == nome]
+    if not posicoes:
         return pd.Series([padrao] * len(df), index=df.index, dtype=object)
 
-    selecionado = df.loc[:, df.columns == nome]
-    if isinstance(selecionado, pd.Series):
-        serie = selecionado
-    elif selecionado.shape[1] == 1:
-        serie = selecionado.iloc[:, 0]
-    else:
-        tratado = selecionado.copy()
-        tratado = tratado.replace(r"^\s*$", pd.NA, regex=True)
-        serie = tratado.bfill(axis=1).iloc[:, 0]
+    bloco = df.iloc[:, posicoes]
+    valores: list[object] = []
+    matriz = bloco.to_numpy(dtype=object, copy=False)
+    for linha in matriz:
+        valores.append(_valor_escalar(list(linha), padrao))
 
-    # Defesa adicional para qualquer retorno 2D vindo de uma versão futura
-    # do pandas ou de um índice de colunas não convencional.
-    if isinstance(serie, pd.DataFrame):
-        serie = serie.bfill(axis=1).iloc[:, 0]
-    return pd.Series(serie, index=df.index).fillna(padrao)
+    # Construir a partir de uma lista Python garante ndim=1 mesmo quando uma
+    # célula de origem contém arrays/listas por corrupção do arquivo legado.
+    return pd.Series(valores, index=df.index, dtype=object, name=nome)
 
 
 def _normalizar_cadastro(df: pd.DataFrame) -> pd.DataFrame:
